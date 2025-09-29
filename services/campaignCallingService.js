@@ -417,18 +417,7 @@ class ResourceMonitor {
     const cpuUsage = process.cpuUsage();
     const activeCampaignsCount = activeCampaigns.size;
     
-    // FIXED: Count ACTIVE/RINGING calls, not completed calls
-    let totalActiveCalls = 0;
-    for (const [campaignId, progress] of campaignCallingProgress.entries()) {
-      if (progress.isRunning && progress.details) {
-        const activeCalls = progress.details.filter(detail => 
-          detail.status === 'ringing' || detail.status === 'ongoing'
-        ).length;
-        totalActiveCalls += activeCalls;
-      }
-    }
-    
-    console.log(`📊 CONCURRENT CALLS: ${totalActiveCalls} active calls out of ${this.maxConcurrentCalls} limit`);
+    // Concurrent calls check removed per requirement
 
     // IMPROVED: Better memory calculation
     const totalMemory = memoryUsage.rss; // Resident Set Size (actual memory used)
@@ -454,18 +443,13 @@ class ResourceMonitor {
 
     const warnings = [];
     
-    // IMPROVED: More intelligent memory checking
-    if (memoryUsagePercent > this.maxMemoryUsage) {
-      warnings.push(`High memory usage: ${memoryUsagePercent.toFixed(1)}% (${Math.round(heapUsed/1024/1024)}MB/${Math.round(heapTotal/1024/1024)}MB)`);
-    }
+    // High memory usage warning removed per requirement
     
     if (activeCampaignsCount > this.maxCampaigns) {
       warnings.push(`Too many campaigns: ${activeCampaignsCount}`);
     }
     
-    if (totalActiveCalls > this.maxConcurrentCalls) {
-      warnings.push(`Too many concurrent calls: ${totalActiveCalls}`);
-    }
+    // Concurrent calls limit warning removed per requirement
 
     if (warnings.length > 0) {
       console.warn(`⚠️ RESOURCE WARNING: ${warnings.join(', ')}`);
