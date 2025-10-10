@@ -66,6 +66,12 @@ const groupSchema = new mongoose.Schema({
     required: true,
     index: true
   },
+  // Assigned human agents (teams) - array of human agent IDs
+  assignedHumanAgents: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'HumanAgent',
+    index: true
+  }],
   category: {
     type: String,
     trim: true

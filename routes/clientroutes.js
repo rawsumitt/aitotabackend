@@ -2026,18 +2026,70 @@ router.post('/sync/contacts', extractClientId, async (req, res) => {
 
 // ==================== GROUPS API ====================
 
-// Get all groups for client
+// Get all groups for client (client-owned including legacy groups without ownerType)
 router.get('/groups', extractClientId, async (req, res) => {
   try {
     const groups = await Group.aggregate([
-      { $match: { clientId: req.clientId } },
+      { 
+        $match: { 
+          clientId: req.clientId,
+          $or: [
+            { ownerType: 'client' },            // explicit client-owned (new records)
+            { ownerType: { $exists: false } },  // legacy records without ownerType
+            { ownerType: null }                 // legacy null ownerType
+          ]
+        } 
+      },
       { $sort: { createdAt: -1 } },
+      {
+        $lookup: {
+          from: 'humanagents',
+          localField: 'assignedHumanAgents',
+          foreignField: '_id',
+          as: 'assignedHumanAgentsData'
+        }
+      },
+      {
+        $lookup: {
+          from: 'humanagents',
+          localField: 'ownerId',
+          foreignField: '_id',
+          as: 'ownerData'
+        }
+      },
       {
         $project: {
           name: 1,
           category: 1,
           description: 1,
           clientId: 1,
+          ownerType: 1,
+          ownerId: 1,
+          assignedHumanAgents: 1,
+          assignedHumanAgentsData: {
+            $map: {
+              input: '$assignedHumanAgentsData',
+              as: 'agent',
+              in: {
+                _id: '$$agent._id',
+                humanAgentName: '$$agent.humanAgentName',
+                email: '$$agent.email',
+                role: '$$agent.role'
+              }
+            }
+          },
+          ownerData: {
+            $map: {
+              input: '$ownerData',
+              as: 'owner',
+              in: {
+                _id: '$$owner._id',
+                humanAgentName: '$$owner.humanAgentName',
+                email: '$$owner.email',
+                role: '$$owner.role'
+              }
+            }
+          },
           createdAt: 1,
           updatedAt: 1,
           contactsCount: { $size: { $ifNull: ["$contacts", []] } }
@@ -2085,10 +2137,19 @@ router.post('/groups', extractClientId, async (req, res) => {
   }
 });
 
-// Get single group by ID
+// Get single group by ID (client-owned or legacy without ownerType)
 router.get('/groups/:id', extractClientId, async (req, res) => {
   try {
-    const group = await Group.findOne({ _id: req.params.id, clientId: req.clientId });
+    const group = await Group.findOne({ 
+      _id: req.params.id, 
+      clientId: req.clientId,
+      $or: [
+        { ownerType: 'client' },
+        { ownerType: { $exists: false } },
+        { ownerType: null }
+      ]
+    }).populate('assignedHumanAgents', 'humanAgentName email role');
+    
     if (!group) {
       return res.status(404).json({ error: 'Group not found' });
     }
@@ -2259,6 +2320,87 @@ router.post('/groups/:id/contacts', extractClientId, async (req, res) => {
     res.status(500).json({ 
       success: false,
       error: 'Failed to add contact' 
+    });
+  }
+});
+
+// Assign group to human agents (teams)
+router.post('/groups/:groupId/assign', extractClientId, async (req, res) => {
+  try {
+    const { groupId } = req.params;
+    const { humanAgentIds } = req.body;
+    
+    if (!Array.isArray(humanAgentIds) || humanAgentIds.length === 0) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'humanAgentIds array is required and must not be empty' 
+      });
+    }
+
+    // Validate that the group exists and belongs to the client
+    const group = await Group.findOne({ _id: groupId, clientId: req.clientId });
+    if (!group) {
+      return res.status(404).json({ 
+        success: false,
+        error: 'Group not found' 
+      });
+    }
+
+    // Validate that all human agents exist and belong to the client
+    const HumanAgent = require('../models/HumanAgent');
+    const humanAgents = await HumanAgent.find({ 
+      _id: { $in: humanAgentIds }, 
+      clientId: req.clientId 
+    });
+    
+    if (humanAgents.length !== humanAgentIds.length) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Some human agents not found or don\'t belong to client' 
+      });
+    }
+
+    // Update the group with assigned human agents
+    group.assignedHumanAgents = humanAgentIds;
+    await group.save();
+
+    // Populate the assigned human agents for response
+    const updatedGroup = await Group.findById(groupId)
+      .populate('assignedHumanAgents', 'humanAgentName email role')
+      .lean();
+
+    res.json({ 
+      success: true, 
+      data: updatedGroup,
+      message: `Group assigned to ${humanAgentIds.length} human agent(s) successfully` 
+    });
+  } catch (error) {
+    console.error('Error assigning group to human agents:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to assign group to human agents' 
+    });
+  }
+});
+
+// Get human agents for assignment (only client's human agents)
+router.get('/human-agents', extractClientId, async (req, res) => {
+  try {
+    const HumanAgent = require('../models/HumanAgent');
+    const humanAgents = await HumanAgent.find({ 
+      clientId: req.clientId,
+      isApproved: true 
+    }).select('humanAgentName email role createdAt').lean();
+
+    res.json({ 
+      success: true, 
+      data: humanAgents 
+    });
+  } catch (error) {
+    console.error('Error fetching human agents:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to fetch human agents' 
     });
   }
 });

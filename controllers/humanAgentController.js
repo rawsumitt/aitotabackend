@@ -407,14 +407,77 @@ exports.listGroups = async (req, res) => {
         const candidates = await getClientIdCandidates(req.user);
         const ownerType = req.user.userType === 'humanAgent' ? 'humanAgent' : 'client';
         const ownerId = new (require('mongoose')).Types.ObjectId(String(req.user.id));
-        // Show only groups owned by the current actor
+        
+        // Show groups owned by the current actor OR groups assigned to the current human agent
         const groups = await Group.aggregate([
-            { $match: { clientId: { $in: candidates }, ownerType, ownerId } },
+            { 
+                $match: { 
+                    clientId: { $in: candidates },
+                    $or: [
+                        { ownerType, ownerId }, // Groups owned by current actor
+                        { assignedHumanAgents: ownerId } // Groups assigned to current human agent
+                    ]
+                } 
+            },
 			{ $sort: { createdAt: -1 } },
-			{ $project: { name: 1, category: 1, description: 1, clientId: 1, createdAt: 1, updatedAt: 1, contactsCount: { $size: { $ifNull: ["$contacts", []] } } } }
+			{
+				$lookup: {
+					from: 'humanagents',
+					localField: 'assignedHumanAgents',
+					foreignField: '_id',
+					as: 'assignedHumanAgentsData'
+				}
+			},
+			{
+				$lookup: {
+					from: 'humanagents',
+					localField: 'ownerId',
+					foreignField: '_id',
+					as: 'ownerData'
+				}
+			},
+			{
+				$project: { 
+					name: 1, 
+					category: 1, 
+					description: 1, 
+					clientId: 1,
+					ownerType: 1,
+					ownerId: 1,
+					assignedHumanAgents: 1,
+					assignedHumanAgentsData: {
+						$map: {
+							input: '$assignedHumanAgentsData',
+							as: 'agent',
+							in: {
+								_id: '$$agent._id',
+								humanAgentName: '$$agent.humanAgentName',
+								email: '$$agent.email',
+								role: '$$agent.role'
+							}
+						}
+					},
+					ownerData: {
+						$map: {
+							input: '$ownerData',
+							as: 'owner',
+							in: {
+								_id: '$$owner._id',
+								humanAgentName: '$$owner.humanAgentName',
+								email: '$$owner.email',
+								role: '$$owner.role'
+							}
+						}
+					},
+					createdAt: 1, 
+					updatedAt: 1, 
+					contactsCount: { $size: { $ifNull: ["$contacts", []] } } 
+				} 
+			}
 		]);
 		return res.json({ success: true, data: groups });
 	} catch (e) {
+		console.error('Error fetching groups (human-agent):', e);
 		return res.status(500).json({ success: false, error: 'Failed to fetch groups' });
 	}
 };
@@ -441,12 +504,23 @@ exports.getGroup = async (req, res) => {
 	try {
         const candidates = await getClientIdCandidates(req.user);
         const ownerType = req.user.userType === 'humanAgent' ? 'humanAgent' : 'client';
-        const ownerId = req.user.id;
+        const ownerId = new (require('mongoose')).Types.ObjectId(String(req.user.id));
 		const { id } = req.params;
-        const group = await Group.findOne({ _id: id, clientId: { $in: candidates }, ownerType, ownerId });
+        
+        // Show group if owned by current actor OR assigned to current human agent
+        const group = await Group.findOne({ 
+            _id: id, 
+            clientId: { $in: candidates },
+            $or: [
+                { ownerType, ownerId }, // Groups owned by current actor
+                { assignedHumanAgents: ownerId } // Groups assigned to current human agent
+            ]
+        }).populate('assignedHumanAgents', 'humanAgentName email role');
+        
 		if (!group) return res.status(404).json({ success: false, error: 'Group not found' });
 		return res.json({ success: true, data: group });
 	} catch (e) {
+		console.error('Error fetching group (human-agent):', e);
 		return res.status(500).json({ success: false, error: 'Failed to fetch group' });
 	}
 };
@@ -687,5 +761,8 @@ exports.singleCall = async (req, res) => {
 		return res.status(500).json({ success: false, error: 'Failed to initiate call' });
 	}
 };
+
+// Export helper function
+module.exports.resolveClientUserId = resolveClientUserId;
 
 

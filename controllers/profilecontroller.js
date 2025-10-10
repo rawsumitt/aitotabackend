@@ -67,8 +67,20 @@ exports.createProfile = async (req, res) => {
       });
     }
 
-    // Validate profile data
-    const validationErrors = validateProfileData(req.body);
+    // If humanAgentId is present, allow minimal profile creation (skip full validation)
+    let validationErrors = [];
+    if (req.body.humanAgentId) {
+      // Only require minimal fields for human agent profile
+      const minimalFields = ['businessName', 'contactNumber', 'role', 'contactName', 'humanAgentId'];
+      for (const f of minimalFields) {
+        if (!req.body[f] || String(req.body[f]).trim().length === 0) {
+          validationErrors.push(`${f} is required`);
+        }
+      }
+    } else {
+      // Validate full profile data for client
+      validationErrors = validateProfileData(req.body);
+    }
     if (validationErrors.length > 0) {
       return res.status(400).json({
         success: false,
