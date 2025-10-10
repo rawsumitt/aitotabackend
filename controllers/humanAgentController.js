@@ -541,8 +541,19 @@ exports.deleteGroup = async (req, res) => {
 // ============ Human Agent: Group Contacts (secured by ownership) ============
 exports.getGroupsContacts = async (req, res) =>{
 	try {
+		const candidates = await getClientIdCandidates(req.user);
+		const ownerType = req.user.userType === 'humanAgent' ? 'humanAgent' : 'client';
+		const ownerId = new (require('mongoose')).Types.ObjectId(String(req.user.id));
 		const { id } = req.params; // group id
-		const group = await Group.findById(id);
+		// Allow access if group is owned by user or assigned to user
+		const group = await Group.findOne({
+			_id: id,
+			clientId: { $in: candidates },
+			$or: [
+				{ ownerType, ownerId },
+				{ assignedHumanAgents: ownerId }
+			]
+		});
 		if (!group) return res.status(404).json({ success: false, error: 'Group not found' });
 		return res.json({ success: true, data: group.contacts || [] });
 	} catch (e) {
@@ -559,7 +570,15 @@ exports.addContactToGroup = async (req, res) => {
 		const { id } = req.params; // group id
 		const { name = '', phone, email = '' } = req.body || {};
 		if (!phone || !String(phone).trim()) return res.status(400).json({ success: false, error: 'Phone is required' });
-		const group = await Group.findOne({ _id: id, clientId: { $in: candidates }, ownerType, ownerId });
+		// Allow access if group is owned by user or assigned to user
+		const group = await Group.findOne({
+			_id: id,
+			clientId: { $in: candidates },
+			$or: [
+				{ ownerType, ownerId },
+				{ assignedHumanAgents: ownerId }
+			]
+		});
 		if (!group) return res.status(404).json({ success: false, error: 'Group not found' });
 		group.contacts.push({ name: String(name).trim(), phone: String(phone).trim(), email: String(email || '').trim() });
 		await group.save();
@@ -578,7 +597,15 @@ exports.bulkAddContactsToGroup = async (req, res) => {
 		const { id } = req.params; // group id
 		const { contacts } = req.body || {};
 		if (!Array.isArray(contacts) || contacts.length === 0) return res.status(400).json({ success: false, error: 'contacts array is required' });
-		const group = await Group.findOne({ _id: id, clientId: { $in: candidates }, ownerType, ownerId });
+		// Allow access if group is owned by user or assigned to user
+		const group = await Group.findOne({
+			_id: id,
+			clientId: { $in: candidates },
+			$or: [
+				{ ownerType, ownerId },
+				{ assignedHumanAgents: ownerId }
+			]
+		});
 		if (!group) return res.status(404).json({ success: false, error: 'Group not found' });
 		for (const c of contacts) {
 			if (!c || !c.phone) continue;
@@ -600,7 +627,15 @@ exports.bulkDeleteContactsFromGroup = async (req, res) => {
 		const { id } = req.params; // group id
 		const { contactIds } = req.body || {};
 		if (!Array.isArray(contactIds) || contactIds.length === 0) return res.status(400).json({ success: false, error: 'contactIds array is required' });
-		const group = await Group.findOne({ _id: id, clientId: { $in: candidates }, ownerType, ownerId });
+		// Allow access if group is owned by user or assigned to user
+		const group = await Group.findOne({
+			_id: id,
+			clientId: { $in: candidates },
+			$or: [
+				{ ownerType, ownerId },
+				{ assignedHumanAgents: ownerId }
+			]
+		});
 		if (!group) return res.status(404).json({ success: false, error: 'Group not found' });
 		const set = new Set(contactIds.map(String));
 		group.contacts = (group.contacts || []).filter(c => !set.has(String(c._id)));
@@ -618,7 +653,15 @@ exports.deleteContactFromGroup = async (req, res) => {
 		const ownerType = req.user.userType === 'humanAgent' ? 'humanAgent' : 'client';
 		const ownerId = new (require('mongoose')).Types.ObjectId(String(req.user.id));
 		const { id, contactId } = req.params;
-		const group = await Group.findOne({ _id: id, clientId: { $in: candidates }, ownerType, ownerId });
+		// Allow access if group is owned by user or assigned to user
+		const group = await Group.findOne({
+			_id: id,
+			clientId: { $in: candidates },
+			$or: [
+				{ ownerType, ownerId },
+				{ assignedHumanAgents: ownerId }
+			]
+		});
 		if (!group) return res.status(404).json({ success: false, error: 'Group not found' });
 		const before = (group.contacts || []).length;
 		group.contacts = (group.contacts || []).filter(c => String(c._id) !== String(contactId));
@@ -772,6 +815,100 @@ exports.singleCall = async (req, res) => {
 		console.error('Human-agent single call failed:', e);
 		return res.status(500).json({ success: false, error: 'Failed to initiate call' });
 	}
+};
+
+// Assign group to human agents (teams) - accessible by clients
+exports.assignGroupToHumanAgents = async (req, res) => {
+  try {
+    const { groupId } = req.params;
+    const { humanAgentIds } = req.body;
+    const { resolveClientUserId } = require('./humanAgentController');
+    if (!Array.isArray(humanAgentIds) || humanAgentIds.length === 0) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'humanAgentIds array is required and must not be empty' 
+      });
+    }
+    // Get client ID from token
+    const clientId = await resolveClientUserId(req.user);
+    // Validate that the group exists and belongs to the client
+    const Group = require('../models/Group');
+    const group = await Group.findOne({ _id: groupId, clientId });
+    if (!group) {
+      return res.status(404).json({ 
+        success: false,
+        error: 'Group not found' 
+      });
+    }
+    // Validate that all human agents exist and belong to the client
+    const HumanAgent = require('../models/HumanAgent');
+    const humanAgents = await HumanAgent.find({ 
+      _id: { $in: humanAgentIds }, 
+      clientId 
+    });
+    if (humanAgents.length !== humanAgentIds.length) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Some human agents not found or don\'t belong to client' 
+      });
+    }
+    // Update the group with assigned human agents
+    group.assignedHumanAgents = humanAgentIds;
+    await group.save();
+    // Populate the assigned human agents for response
+    const updatedGroup = await Group.findById(groupId)
+      .populate('assignedHumanAgents', 'humanAgentName email role')
+      .lean();
+    res.json({ 
+      success: true, 
+      data: updatedGroup,
+      message: `Group assigned to ${humanAgentIds.length} human agent(s) successfully` 
+    });
+  } catch (error) {
+    console.error('Error assigning group to human agents:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to assign group to human agents' 
+    });
+  }
+};
+
+// Get human agents for assignment - accessible by clients
+exports.getHumanAgentsForAssignment = async (req, res) => {
+  try {
+    const { resolveClientUserId } = require('./humanAgentController');
+    // resolveClientUserId returns canonical client userId (string) in our system; 
+    // HumanAgent.model uses ObjectId for clientId, so convert when possible
+    const canonical = await resolveClientUserId(req.user);
+    const mongoose = require('mongoose');
+    let clientIdFilter;
+    // If canonical looks like ObjectId, use it; otherwise map Client by userId first
+    if (canonical && typeof canonical === 'string' && canonical.length === 24) {
+      clientIdFilter = new mongoose.Types.ObjectId(canonical);
+    } else {
+      const Client = require('../models/Client');
+      const clientDoc = await Client.findOne({ userId: canonical }).select('_id').lean();
+      clientIdFilter = clientDoc?._id || null;
+    }
+    if (!clientIdFilter) {
+      return res.json({ success: true, data: [] });
+    }
+    const HumanAgent = require('../models/HumanAgent');
+    const humanAgents = await HumanAgent.find({ 
+      clientId: clientIdFilter,
+      isApproved: true 
+    }).select('humanAgentName email role createdAt').lean();
+    res.json({ 
+      success: true, 
+      data: humanAgents 
+    });
+  } catch (error) {
+    console.error('Error fetching human agents:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to fetch human agents' 
+    });
+  }
 };
 
 // Export helper function

@@ -2329,14 +2329,12 @@ router.post('/groups/:groupId/assign', extractClientId, async (req, res) => {
   try {
     const { groupId } = req.params;
     const { humanAgentIds } = req.body;
-    
     if (!Array.isArray(humanAgentIds) || humanAgentIds.length === 0) {
       return res.status(400).json({ 
         success: false,
         error: 'humanAgentIds array is required and must not be empty' 
       });
     }
-
     // Validate that the group exists and belongs to the client
     const group = await Group.findOne({ _id: groupId, clientId: req.clientId });
     if (!group) {
@@ -2345,30 +2343,28 @@ router.post('/groups/:groupId/assign', extractClientId, async (req, res) => {
         error: 'Group not found' 
       });
     }
-
     // Validate that all human agents exist and belong to the client
     const HumanAgent = require('../models/HumanAgent');
     const humanAgents = await HumanAgent.find({ 
       _id: { $in: humanAgentIds }, 
       clientId: req.clientId 
     });
-    
     if (humanAgents.length !== humanAgentIds.length) {
       return res.status(400).json({ 
         success: false,
         error: 'Some human agents not found or don\'t belong to client' 
       });
     }
-
-    // Update the group with assigned human agents
-    group.assignedHumanAgents = humanAgentIds;
+    // Add new human agents to assignedHumanAgents array (no duplicates)
+    const currentAssigned = Array.isArray(group.assignedHumanAgents) ? group.assignedHumanAgents.map(id => String(id)) : [];
+    const newAssigned = humanAgentIds.map(id => String(id));
+    const mergedAssigned = Array.from(new Set([...currentAssigned, ...newAssigned]));
+    group.assignedHumanAgents = mergedAssigned;
     await group.save();
-
     // Populate the assigned human agents for response
     const updatedGroup = await Group.findById(groupId)
       .populate('assignedHumanAgents', 'humanAgentName email role')
       .lean();
-
     res.json({ 
       success: true, 
       data: updatedGroup,
