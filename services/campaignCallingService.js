@@ -1,3 +1,4 @@
+// @ts-nocheck
 const axios = require('axios');
 const ApiKey = require('../models/ApiKey');
 const Agent = require('../models/Agent');
@@ -245,6 +246,13 @@ async function updateCampaignRunningStatus(campaign) {
       shouldUpdate = true;
       console.log(`🔄 Auto-stopping campaign ${campaign._id}: all calls finalized`);
       
+      // Persist run to history on auto-stop to ensure history is saved in serial mode
+      try {
+        await autoSaveCampaignRun(campaign, progress || { currentIndex: campaign.details?.length || 0 });
+      } catch (e) {
+        console.error('❌ Auto-save campaign run failed on auto-stop:', e?.message);
+      }
+      
       // FALLBACK: Schedule cleanup after 5 minutes for automatically stopped campaigns
       setTimeout(async () => {
         try {
@@ -403,6 +411,7 @@ const rateLimiter = new RateLimiter();
 /**
  * Resource Monitor for system health
  */
+/* Resource Monitor removed */
 class ResourceMonitor {
   constructor() {
     this.maxMemoryUsage = 90; // 90% of available memory (T3.Medium has 4GB RAM)
@@ -417,7 +426,18 @@ class ResourceMonitor {
     const cpuUsage = process.cpuUsage();
     const activeCampaignsCount = activeCampaigns.size;
     
-    // Concurrent calls check removed per requirement
+    // FIXED: Count ACTIVE/RINGING calls, not completed calls
+    let totalActiveCalls = 0;
+    for (const [campaignId, progress] of campaignCallingProgress.entries()) {
+      if (progress.isRunning && progress.details) {
+        const activeCalls = progress.details.filter(detail => 
+          detail.status === 'ringing' || detail.status === 'ongoing'
+        ).length;
+        totalActiveCalls += activeCalls;
+      }
+    }
+    
+    console.log(`📊 CONCURRENT CALLS: ${totalActiveCalls} active calls out of ${this.maxConcurrentCalls} limit`);
 
     // IMPROVED: Better memory calculation
     const totalMemory = memoryUsage.rss; // Resident Set Size (actual memory used)
@@ -443,13 +463,18 @@ class ResourceMonitor {
 
     const warnings = [];
     
-    // High memory usage warning removed per requirement
+    // IMPROVED: More intelligent memory checking
+    if (memoryUsagePercent > this.maxMemoryUsage) {
+      warnings.push(`High memory usage: ${memoryUsagePercent.toFixed(1)}% (${Math.round(heapUsed/1024/1024)}MB/${Math.round(heapTotal/1024/1024)}MB)`);
+    }
     
     if (activeCampaignsCount > this.maxCampaigns) {
       warnings.push(`Too many campaigns: ${activeCampaignsCount}`);
     }
     
-    // Concurrent calls limit warning removed per requirement
+    if (totalActiveCalls > this.maxConcurrentCalls) {
+      warnings.push(`Too many concurrent calls: ${totalActiveCalls}`);
+    }
 
     if (warnings.length > 0) {
       console.warn(`⚠️ RESOURCE WARNING: ${warnings.join(', ')}`);
@@ -487,8 +512,8 @@ class ResourceMonitor {
   }
 }
 
-// Global resource monitor
-const resourceMonitor = new ResourceMonitor();
+// Resource monitor disabled
+// const resourceMonitor = new ResourceMonitor();
 
 // AUTOMATIC: Background service to monitor and update call statuses
 let statusUpdateInterval = null;
@@ -642,17 +667,14 @@ function generateUniqueId() {
 /**
  * Make a single call to a contact
  */
-async function makeSingleCall(contact, agentId, apiKey, campaignId, clientId, runId = null, providedUniqueId = null) {
+async function makeSingleCall(contact, agentId, apiKey, campaignId, clientId, runId = null, providedUniqueId = null, extraCustomParams = {}) {
   const uniqueId = providedUniqueId || generateUniqueId(); // Use provided uniqueId or generate new one
   
   console.log(`📞 MAKING CALL: Contact=${contact?.phone}, AgentId=${agentId}, ApiKey=${!!apiKey}, ClientId=${clientId}`);
   
   try {
     // Check resource availability
-    if (!resourceMonitor.checkResources()) {
-      console.log(`⚠️ RESOURCE LIMIT: System resources exhausted`);
-      throw new Error('System resources exhausted');
-    }
+
     // Load agent to branch by provider
     const agent = await Agent.findById(agentId).lean();
     const provider = String(agent?.serviceProvider || '').toLowerCase();
@@ -701,7 +723,7 @@ async function makeSingleCall(contact, agentId, apiKey, campaignId, clientId, ru
 
       // 2) Dial call (apitoken in header) with circuit breaker and retry
       const dialUrl = 'https://clouduat28.sansoftwares.com/pbxadmin/sanpbxapi/dialcall';
-      const dialBody = { appid: 2, call_to: callTo, caller_id: callerId, custom_field: { uniqueid: uniqueId, name: contact.name , runId } };
+      const dialBody = { appid: 2, call_to: callTo, caller_id: callerId, custom_field: { uniqueid: uniqueId, name: contact.name , runId, ...(extraCustomParams || {}) } };
       let response;
       retryCount = 0;
       
@@ -765,7 +787,8 @@ async function makeSingleCall(contact, agentId, apiKey, campaignId, clientId, ru
         name: safeName,
         contact_name: safeName,
         clientUserId: contact?.clientUserId || null,
-        runId: runId
+        runId: runId,
+        ...(extraCustomParams || {})
       },
       resFormat: 3,
     };
@@ -813,9 +836,9 @@ async function makeSingleCall(contact, agentId, apiKey, campaignId, clientId, ru
 }
 
 /**
- * Start campaign calling process
+ * Start campaign calling process with NGR support
  */
-async function startCampaignCalling(campaign, agentId, apiKey, delayBetweenCalls, clientId, runId) {
+async function startCampaignCalling(campaign, agentId, apiKey, delayBetweenCalls, clientId, runId, agentConfig = null) {
   const campaignId = campaign._id.toString();
   
   // Initialize progress tracking
@@ -829,27 +852,219 @@ async function startCampaignCalling(campaign, agentId, apiKey, delayBetweenCalls
     startTime: new Date(),
     isRunning: true,
     lastCallTime: null,
-    runId: runId || `run-${Date.now()}` // Store runId for tracking
+    runId: runId || `run-${Date.now()}`, // Store runId for tracking
+    callingMode: agentConfig?.mode || 'serial' // Track calling mode
   };
 
   campaignCallingProgress.set(campaignId, progress);
   activeCampaigns.set(campaignId, true);
 
-  
+  // Determine calling strategy based on agent configuration
+  if (agentConfig && agentConfig.mode === 'parallel' && agentConfig.items && agentConfig.items.length > 0) {
+    // Use NGR pattern for parallel mode
+    const defaultConfig = agentConfig.items.find(item => item.isDefault) || agentConfig.items[0];
+    const ngrConfig = {
+      n: defaultConfig.n || 1,
+      g: defaultConfig.g || 5,
+      rSec: defaultConfig.rSec || 30
+    };
+    
+    console.log(`🚀 NGR CAMPAIGN START: Using NGR pattern with N=${ngrConfig.n}, G=${ngrConfig.g}s, R=${ngrConfig.rSec}s`);
+    
+    // Process calls using NGR pattern
+    processCampaignCallsNGR(campaign, agentId, apiKey, clientId, progress, runId, ngrConfig).catch(error => {
+      console.error(`❌ NGR Background campaign processing failed:`, error);
+      progress.isRunning = false;
+      progress.endTime = new Date();
+      progress.error = error.message;
+      campaignCallingProgress.set(campaignId, progress);
+    });
+  } else {
+    // Use legacy batch processing for series mode or when no NGR config
+    console.log(`🚀 LEGACY CAMPAIGN START: Using legacy batch processing`);
+    processCampaignCalls(campaign, agentId, apiKey, delayBetweenCalls, clientId, progress, runId).catch(error => {
+      console.error(`❌ Background campaign processing failed:`, error);
+      progress.isRunning = false;
+      progress.endTime = new Date();
+      progress.error = error.message;
+      campaignCallingProgress.set(campaignId, progress);
+    });
+  }
+}
 
-  // Process calls in background (non-blocking)
-  processCampaignCalls(campaign, agentId, apiKey, delayBetweenCalls, clientId, progress, runId).catch(error => {
-    console.error(`❌ Background campaign processing failed:`, error);
-    // Mark campaign as failed
+/**
+ * Process campaign calls using NGR pattern for parallel mode
+ */
+async function processCampaignCallsNGR(campaign, agentId, apiKey, clientId, progress, runId, ngrConfig) {
+  const campaignId = campaign._id.toString();
+  const { n = 1, g = 5, rSec = 30 } = ngrConfig;
+  
+  console.log(`🚀 NGR CAMPAIGN: Starting with N=${n} concurrent, G=${g} numbers per batch, R=${rSec}s rest`);
+  
+  try {
+    const totalContacts = campaign.contacts.length;
+    let currentIndex = 0;
+    
+    while (currentIndex < totalContacts && progress.isRunning) {
+      // Check if campaign should stop
+      const callActive = activeCampaigns.get(campaignId);
+      if (!callActive) {
+        console.log(`🛑 NGR CAMPAIGN STOPPED: Campaign ${campaignId} removed from active campaigns`);
+        break;
+      }
+      
+      const callProgress = campaignCallingProgress.get(campaignId);
+      if (callProgress && callProgress.manuallyStopped) {
+        console.log(`🛑 NGR MANUAL STOP: Campaign ${campaignId} was manually stopped`);
+        break;
+      }
+      
+      // Process a batch of G numbers (contacts)
+      const batchEnd = Math.min(currentIndex + g, totalContacts);
+      const batchContacts = campaign.contacts.slice(currentIndex, batchEnd);
+      
+      console.log(`📞 NGR BATCH: Processing ${batchContacts.length} numbers (${currentIndex + 1}-${batchEnd}/${totalContacts}) with up to N=${n} concurrent calls`);
+
+      // Run the batch with a max concurrency of N (no per-call gaps)
+      for (let i = 0; i < batchContacts.length; i += n) {
+        const chunk = batchContacts.slice(i, i + n);
+        await Promise.all(
+          chunk.map(async (contact, idxInChunk) => {
+            const globalIndex = currentIndex + i + idxInChunk; // 0-based
+
+            // Update progress index to reflect the call being initiated
+            progress.currentIndex = globalIndex;
+            campaignCallingProgress.set(campaignId, progress);
+
+            try {
+              console.log(`📞 NGR CALL: Making call ${globalIndex + 1}/${totalContacts} to ${contact.phone}`);
+              const callResult = await makeSingleCall(contact, agentId, apiKey, campaign._id, clientId, runId, null);
+
+              if (callResult.success) {
+                progress.successfulCalls++;
+                console.log(`✅ NGR SUCCESS: Call ${globalIndex + 1} completed successfully`);
+                // Append call detail to campaign (same structure as legacy path)
+                if (callResult.uniqueId) {
+                  const initiatedAt = new Date();
+                  const callDetail = {
+                    uniqueId: callResult.uniqueId,
+                    contactId: contact._id || null,
+                    time: initiatedAt,
+                    status: 'ringing',
+                    lastStatusUpdate: initiatedAt,
+                    callDuration: 0,
+                    ...(runId ? { runId } : {})
+                  };
+                  try {
+                    const Campaign = require('../models/Campaign');
+                    await Campaign.updateOne(
+                      { _id: campaign._id, 'details.uniqueId': { $ne: callResult.uniqueId } },
+                      { $push: { details: callDetail } }
+                    );
+                    // Schedule a status check after ~40s to mirror frontend behavior
+                    setTimeout(() => {
+                      updateCallStatusFromLogs(campaign._id, callResult.uniqueId).catch(() => {});
+                    }, 40000);
+                  } catch (e) {
+                    console.error(`❌ NGR: Failed to append success call detail ${callResult.uniqueId}:`, e.message);
+                  }
+                }
+              } else {
+                progress.failedCalls++;
+                console.log(`❌ NGR FAILED: Call ${globalIndex + 1} failed`);
+                // Append failed call detail so UI shows it as completed/not connected
+                if (callResult.uniqueId) {
+                  const initiatedAt = new Date();
+                  const callDetail = {
+                    uniqueId: callResult.uniqueId,
+                    contactId: contact._id || null,
+                    time: initiatedAt,
+                    status: 'completed',
+                    lastStatusUpdate: initiatedAt,
+                    callDuration: 0,
+                    leadStatus: 'not_connected',
+                    ...(runId ? { runId } : {})
+                  };
+                  try {
+                    const Campaign = require('../models/Campaign');
+                    await Campaign.updateOne(
+                      { _id: campaign._id, 'details.uniqueId': { $ne: callResult.uniqueId } },
+                      { $push: { details: callDetail } }
+                    );
+                  } catch (e) {
+                    console.error(`❌ NGR: Failed to append failed call detail ${callResult.uniqueId}:`, e.message);
+                  }
+                }
+              }
+
+              progress.completedCalls++;
+              progress.lastCallTime = new Date();
+              campaignCallingProgress.set(campaignId, progress);
+
+              return callResult;
+            } catch (error) {
+              progress.failedCalls++;
+              progress.completedCalls++;
+              progress.lastCallTime = new Date();
+              campaignCallingProgress.set(campaignId, progress);
+              console.error(`❌ NGR ERROR: Call ${globalIndex + 1} error:`, error.message);
+              // Append failed call detail without uniqueId (fallback)
+              try {
+                const initiatedAt = new Date();
+                const Campaign = require('../models/Campaign');
+                const fallbackDetail = {
+                  uniqueId: `error-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+                  contactId: contact._id || null,
+                  time: initiatedAt,
+                  status: 'completed',
+                  lastStatusUpdate: initiatedAt,
+                  callDuration: 0,
+                  leadStatus: 'not_connected',
+                  ...(runId ? { runId } : {})
+                };
+                await Campaign.updateOne(
+                  { _id: campaign._id, 'details.uniqueId': { $ne: fallbackDetail.uniqueId } },
+                  { $push: { details: fallbackDetail } }
+                );
+              } catch (e) {
+                // swallow
+              }
+              return { success: false, error: error.message };
+            }
+          })
+        );
+      }
+      
+      currentIndex = batchEnd;
+      
+      // Add R-second rest after completing G numbers (except for the last batch)
+      if (currentIndex < totalContacts) {
+        console.log(`⏳ NGR REST: Waiting ${rSec} seconds before next batch`);
+        await new Promise(resolve => setTimeout(resolve, rSec * 1000));
+      }
+    }
+    
+    // Mark campaign as completed
+    progress.isRunning = false;
+    progress.endTime = new Date();
+    progress.currentIndex = totalContacts;
+    campaignCallingProgress.set(campaignId, progress);
+    activeCampaigns.delete(campaignId);
+    
+    console.log(`✅ NGR CAMPAIGN COMPLETED: ${campaignId} finished with ${progress.successfulCalls} successful calls`);
+    
+  } catch (error) {
+    console.error(`❌ NGR CAMPAIGN ERROR:`, error);
     progress.isRunning = false;
     progress.endTime = new Date();
     progress.error = error.message;
     campaignCallingProgress.set(campaignId, progress);
-  });
+    activeCampaigns.delete(campaignId);
+  }
 }
 
 /**
- * Process campaign calls in background with batch processing
+ * Process campaign calls in background with batch processing (legacy method)
  */
 async function processCampaignCalls(campaign, agentId, apiKey, delayBetweenCalls, clientId, progress, runId) {
   const campaignId = campaign._id.toString();
@@ -953,6 +1168,31 @@ async function processCampaignCalls(campaign, agentId, apiKey, delayBetweenCalls
     
     console.log(`✅ CAMPAIGN COMPLETED: All ${campaign.contacts.length} calls processed`);
     
+    // Watchdog: after a short window, force-finalize history if all calls appear finalized
+    try {
+      const FINALIZE_AFTER_MS = 60000; // 60s buffer to allow last logs to land
+      setTimeout(async () => {
+        try {
+          const Campaign = require('../models/Campaign');
+          const refreshed = await Campaign.findById(campaignId).select('_id details isRunning updatedAt createdAt clientId').lean();
+          const details = Array.isArray(refreshed?.details) ? refreshed.details : [];
+          const initiatedCount = details.length;
+          const completedCount = details.filter(d => d && d.status === 'completed').length;
+          const hasActive = details.some(d => d && (d.status === 'ringing' || d.status === 'ongoing'));
+          const allCallsFinalized = initiatedCount > 0 && !hasActive && completedCount === initiatedCount;
+          if (allCallsFinalized) {
+            try {
+              await autoSaveCampaignRun({ ...campaign, details }, campaignCallingProgress.get(campaignId) || progress);
+            } catch (e) {
+              console.error('❌ Watchdog auto-save failed:', e?.message);
+            }
+          }
+        } catch (e) {
+          console.error('❌ Watchdog finalize check failed:', e?.message);
+        }
+      }, FINALIZE_AFTER_MS);
+    } catch {}
+     
   } catch (error) {
     console.error(`❌ Error in campaign calling process for ${campaignId}:`, error);
     progress.isRunning = false;
@@ -1231,27 +1471,7 @@ async function saveBatchProgress(campaign, progress, runId, batchNumber, totalBa
     
     console.log(`✅ BATCH ${batchNumber}/${totalBatches} APPENDED: ${progress.completedCalls} calls processed (run ${runId})`);
     
-    // CRITICAL: If this is the final batch, stop the campaign
-    const isFinalBatch = batchNumber >= totalBatches;
-    if (isFinalBatch) {
-      console.log(`🏁 FINAL BATCH: Campaign ${campaignId} completed, stopping campaign`);
-      
-      // Stop campaign in database
-      await Campaign.updateOne(
-        { _id: campaign._id },
-        { $set: { isRunning: false } }
-      );
-      
-      // Remove from active campaigns
-      activeCampaigns.delete(campaignId);
-      
-      // Mark progress as completed
-      progress.isRunning = false;
-      progress.endTime = new Date();
-      campaignCallingProgress.set(campaignId, progress);
-      
-      console.log(`✅ CAMPAIGN COMPLETED: All ${campaign.contacts.length} calls processed`);
-    }
+    // CRITICAL: If this is the final batch, do not force stop here; let series/other flows manage isRunning
     
     // Update progress in memory
     campaignCallingProgress.set(campaignId, progress);
@@ -1325,41 +1545,7 @@ setInterval(cleanupCompletedCampaigns, 60 * 60 * 1000);
 // Clean up stale active calls every 10 minutes
 setInterval(cleanupStaleActiveCalls, 10 * 60 * 1000);
 
-// Memory cleanup every 30 minutes
-setInterval(() => {
-  try {
-    // Clean up old call history from rate limiter
-    const oneDayAgo = Date.now() - 86400000;
-    rateLimiter.callHistory = rateLimiter.callHistory.filter(call => call.timestamp > oneDayAgo);
-    
-    // Clean up old memory history
-    const oneHourAgo = Date.now() - 3600000;
-    resourceMonitor.memoryHistory = resourceMonitor.memoryHistory.filter(entry => entry.timestamp > oneHourAgo);
-    
-    // Clean up completed campaigns from memory
-    const now = new Date();
-    const oneHourAgoDate = new Date(now.getTime() - 60 * 60 * 1000);
-    
-    for (const [campaignId, progress] of campaignCallingProgress.entries()) {
-      if (!progress.isRunning && progress.endTime && progress.endTime < oneHourAgoDate) {
-        campaignCallingProgress.delete(campaignId);
-        console.log(`🧹 Cleaned up old campaign progress: ${campaignId}`);
-      }
-    }
-    
-    // Force garbage collection if available
-    if (global.gc) {
-      global.gc();
-      console.log('🧹 Memory cleanup: Garbage collection triggered');
-    }
-    
-    // Log detailed memory usage
-    const memoryUsage = process.memoryUsage();
-    console.log(`📊 MEMORY USAGE: Heap ${Math.round(memoryUsage.heapUsed/1024/1024)}MB/${Math.round(memoryUsage.heapTotal/1024/1024)}MB, RSS ${Math.round(memoryUsage.rss/1024/1024)}MB`);
-  } catch (error) {
-    console.error('❌ Memory cleanup error:', error);
-  }
-}, 30 * 60 * 1000); // Every 30 minutes
+// Memory cleanup interval removed
 
 // Graceful shutdown handler
 process.on('SIGTERM', async () => {
@@ -1742,22 +1928,7 @@ async function autoSaveCampaignRun(campaign, progress) {
   }
 }
 
-/**
- * Get system health and monitoring stats
- */
-function getSystemHealth() {
-  return {
-    resourceMonitor: resourceMonitor.getStats(),
-    activeCampaigns: activeCampaigns.size,
-    campaignProgress: campaignCallingProgress.size,
-    circuitBreakers: {
-      api: apiCircuitBreaker.getState(),
-      sanpbx: sanpbxCircuitBreaker.getState()
-    },
-    rateLimiter: rateLimiter.getStats(),
-    timestamp: new Date()
-  };
-}
+
 
 /**
  * Reset circuit breakers (for debugging)
@@ -1770,54 +1941,7 @@ function resetCircuitBreakers() {
   console.log('🔄 Circuit breakers reset');
 }
 
-/**
- * Get safe calling limits
- */
-function getSafeLimits() {
-  return {
-    maxCallsPerBatch: 25,
-    maxConcurrentCampaigns: 3,
-    minDelayBetweenCalls: 3000,
-    rateLimits: rateLimiter.rateLimits,
-    resourceLimits: {
-      maxMemoryUsage: 80,
-      maxCpuUsage: 80,
-      maxCampaigns: 5,
-      maxConcurrentCalls: 10
-    }
-  };
-}
 
-module.exports = {
-  getClientApiKey,
-  makeSingleCall,
-  startCampaignCalling,
-  stopCampaignCalling,
-  getCampaignCallingProgress,
-  getActiveCampaigns,
-  cleanupCompletedCampaigns,
-  updateCallStatusFromLogs,
-  updateCampaignRunningStatus,
-  startAutomaticStatusUpdates,
-  stopAutomaticStatusUpdates,
-  updateAllCampaignCallStatuses,
-  triggerManualStatusUpdate,
-  debugCallStatus,
-  migrateMissedToCompleted,
-  fixStuckCalls,
-  cleanupStaleActiveCalls,
-  cleanupStuckCampaignsOnRestart,
-  saveBatchProgress,
-  autoSaveCampaignRun,
-  cleanupCompletedCampaignsWithDetails,
-  getSystemHealth,
-  resetCircuitBreakers,
-  getSafeLimits
-};
-
-/**
- * MIGRATION: Convert any existing 'missed' status to 'completed'
- */
 async function migrateMissedToCompleted() {
   try {
     const Campaign = require('../models/Campaign');
@@ -1878,3 +2002,34 @@ migrateMissedToCompleted().then(() => {
 }).then(() => {
   startAutomaticStatusUpdates();
 });
+
+
+module.exports = {
+  getClientApiKey,
+  makeSingleCall,
+  startCampaignCalling,
+  stopCampaignCalling,
+  getCampaignCallingProgress,
+  getActiveCampaigns,
+  cleanupCompletedCampaigns,
+  updateCallStatusFromLogs,
+  updateCampaignRunningStatus,
+  startAutomaticStatusUpdates,
+  stopAutomaticStatusUpdates,
+  updateAllCampaignCallStatuses,
+  triggerManualStatusUpdate,
+  debugCallStatus,
+  migrateMissedToCompleted,
+  fixStuckCalls,
+  cleanupStaleActiveCalls,
+  cleanupStuckCampaignsOnRestart,
+  saveBatchProgress,
+  autoSaveCampaignRun,
+  cleanupCompletedCampaignsWithDetails,
+  resetCircuitBreakers,
+  processCampaignCallsNGR,
+};
+
+/**
+ * MIGRATION: Convert any existing 'missed' status to 'completed'
+ */

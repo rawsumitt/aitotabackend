@@ -281,6 +281,61 @@ const getClients = async (req, res) => {
     }
   };
 
+  const updateClient = async (req, res) => {
+    try {
+      const { clientId } = req.params;
+      if (!clientId) {
+        return res.status(400).json({ success: false, message: 'Missing clientId' });
+      }
+
+      // Only set provided fields
+      const {
+        name,
+        businessName,
+        websiteUrl,
+        city,
+        pincode,
+        gstNo,
+        panNo,
+        aadharNo,
+        mobileNo,
+        address,
+        state,
+      } = req.body || {};
+
+      const update = {};
+      if (name !== undefined) update.name = name;
+      if (businessName !== undefined) update.businessName = businessName;
+      if (websiteUrl !== undefined) update.websiteUrl = websiteUrl;
+      if (city !== undefined) update.city = city;
+      if (pincode !== undefined) update.pincode = pincode;
+      if (gstNo !== undefined) update.gstNo = gstNo;
+      if (panNo !== undefined) update.panNo = panNo;
+      if (aadharNo !== undefined) update.aadharNo = aadharNo;
+      if (mobileNo !== undefined) update.mobileNo = mobileNo;
+      if (address !== undefined) update.address = address;
+      if (state !== undefined) update.state = state;
+
+      if (Object.keys(update).length === 0) {
+        return res.status(400).json({ success: false, message: 'No fields to update' });
+      }
+
+      const client = await Client.findByIdAndUpdate(
+        clientId,
+        { $set: update },
+        { new: true }
+      );
+
+      if (!client) {
+        return res.status(404).json({ success: false, message: 'Client not found' });
+      }
+      res.status(200).json({ success: true, message: 'Client updated successfully', client });
+    } catch (error) {
+      console.error('Error updating client:', error);
+      res.status(500).json({ success: false, message: 'Failed to update client', error: error.message });
+    }
+  };
+
   const deleteclient = async(req, res) => {
     try {
         const id = req.params.id;
@@ -513,7 +568,7 @@ const assignDidToAgent = async (req, res) => {
   
     // Set SANPBX credentials if provider is snapbx/sanpbx
     if (didDoc.provider === 'snapbx' || didDoc.provider === 'sanpbx') {
-      agent.accessToken = agent.accessToken || '265b2d7e5d1a5d9c33fc22b01e5d0f19';
+      agent.accessToken = agent.accessToken || 'e4b197411fd53012607649f23a6d28f9';
       agent.accessKey = agent.accessKey || 'mob';
       agent.appId = agent.appId || '3';
     }
@@ -575,6 +630,42 @@ const assignCzentrixToAgent = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Agent has a running campaign. Provider cannot be changed now.' });
     }
 
+    // Find and clear C-Zentrix details from any previously assigned agents
+    // This ensures only one agent can have C-Zentrix assignment at a time
+    const previouslyAssignedAgents = await Agent.find({
+      serviceProvider: { $in: ['c-zentrix', 'c-zentrax'] },
+      _id: { $ne: agentId } // Exclude the current agent being assigned
+    });
+
+    if (previouslyAssignedAgents.length > 0) {
+      console.log(`🔄 [C-ZENTRIX-REASSIGN] Clearing C-Zentrix details from ${previouslyAssignedAgents.length} previously assigned agents`);
+      
+      // Clear C-Zentrix details from all previously assigned agents
+      await Agent.updateMany(
+        { 
+          serviceProvider: { $in: ['c-zentrix', 'c-zentrax'] },
+          _id: { $ne: agentId }
+        },
+        {
+          $unset: {
+            serviceProvider: '',
+            accountSid: '',
+            callerId: '',
+            X_API_KEY: '',
+            didNumber: '',
+            accessToken: '',
+            accessKey: '',
+            appId: ''
+          },
+          $set: {
+            updatedAt: new Date()
+          }
+        }
+      );
+
+      console.log(`✅ [C-ZENTRIX-REASSIGN] Cleared C-Zentrix details from agents: ${previouslyAssignedAgents.map(a => a._id).join(', ')}`);
+    }
+
     // Update DID if provided; otherwise keep existing or clear if previously SANPBX-only flow requires
     if (typeof didNumber !== 'undefined') {
       agent.didNumber = String(didNumber || '').trim() || undefined;
@@ -590,7 +681,15 @@ const assignCzentrixToAgent = async (req, res) => {
     agent.updatedAt = new Date();
     await agent.save();
 
-    return res.json({ success: true, data: agent });
+    console.log(`✅ [C-ZENTRIX-REASSIGN] Successfully assigned C-Zentrix to agent ${agentId}`);
+
+    return res.json({ 
+      success: true, 
+      data: agent,
+      message: previouslyAssignedAgents.length > 0 
+        ? `C-Zentrix assigned successfully. Cleared details from ${previouslyAssignedAgents.length} previously assigned agents.`
+        : 'C-Zentrix assigned successfully.'
+    });
   } catch (error) {
     console.error('[assignCzentrixToAgent] error:', error);
     return res.status(500).json({ success: false, message: error.message || 'Failed to assign C-Zentrix' });
@@ -912,7 +1011,7 @@ const updateAgent = async (req, res) => {
   }
 };
 
-module.exports = { loginAdmin, registerAdmin,getClients,getClientById,registerclient,deleteclient,getClientToken, approveClient, getAllAgents, toggleAgentStatus, copyAgent, deleteAgent, updateAgent, listDidNumbers, createDidNumber, addDidNumber, assignDidToAgent, unassignDid, assignCzentrixToAgent };
+module.exports = { loginAdmin, registerAdmin,getClients,getClientById,registerclient,deleteclient,getClientToken, approveClient, getAllAgents, toggleAgentStatus, copyAgent, deleteAgent, updateAgent,updateClient, listDidNumbers, createDidNumber, addDidNumber, assignDidToAgent, unassignDid, assignCzentrixToAgent };
 
 // Return agents locked due to running campaigns
 module.exports.getCampaignLocks = async (_req, res) => {

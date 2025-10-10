@@ -1086,6 +1086,42 @@ router.post('/voice/synthesize', verifyClientOrAdminAndExtractClientId, async (r
   }
 });
 
+// Stream agent's firstMessage as generated audio without saving
+router.get('/agents/:id/first-message/audio', verifyClientOrAdminAndExtractClientId, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const query = req.clientId ? { _id: id, clientId: req.clientId } : { _id: id };
+    const agent = await Agent.findOne(query).lean();
+    if (!agent) {
+      return res.status(404).json({ success: false, message: 'Agent not found' });
+    }
+    const text = (agent.firstMessage || '').trim();
+    if (!text) {
+      return res.status(400).json({ success: false, message: 'Agent has no firstMessage' });
+    }
+
+    const language = agent.language || 'en';
+    const speaker = agent.voiceSelection || agent.voiceId;
+    const serviceProvider = agent.ttsSelection || agent.voiceServiceProvider || 'sarvam';
+
+    const audioResult = await voiceService.textToSpeech(text, language, speaker, serviceProvider);
+    let buf = audioResult.audioBuffer;
+    if (!buf && audioResult.audioBase64) buf = Buffer.from(audioResult.audioBase64, 'base64');
+    if (!buf) {
+      return res.status(500).json({ success: false, message: 'Audio generation failed' });
+    }
+
+    const format = (audioResult.format || 'mp3').toLowerCase();
+    const mime = format === 'wav' ? 'audio/wav' : (format === 'ogg' ? 'audio/ogg' : 'audio/mpeg');
+    res.set({ 'Content-Type': mime, 'Content-Length': buf.length });
+    return res.send(buf);
+  } catch (error) {
+    console.error('❌ First message audio error:', error);
+    const message = typeof error?.message === 'string' ? error.message : String(error);
+    return res.status(500).json({ success: false, message });
+  }
+});
+
 // Inbound Reports
 router.get('/inbound/report', extractClientId, async (req, res) => {
   try {
@@ -2312,7 +2348,6 @@ router.delete('/groups/:groupId/contacts/:contactId', extractClientId, async (re
     res.status(500).json({ error: 'Failed to delete contact' });
   }
 });
-
 // Bulk add contacts to a group in a single request
 // Body: { contacts: [{ name?: string, phone: string, email?: string }] }
 router.post('/groups/:groupId/contacts/bulk-add', extractClientId, async (req, res) => {
@@ -3090,7 +3125,6 @@ router.get('/campaigns/:id/groups', extractClientId, async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch campaign groups' });
   }
 });
-
 // Add unique ID to campaign (for tracking campaign calls)
 router.post('/campaigns/:id/unique-ids', extractClientId, async (req, res) => {
   try {
@@ -3125,6 +3159,15 @@ router.post('/campaigns/:id/unique-ids', extractClientId, async (req, res) => {
       }
       
       campaign.details.push(callDetail);
+
+      // Ensure uniqueIds array is maintained for efficient lookup
+      if (!Array.isArray(campaign.uniqueIds)) {
+        campaign.uniqueIds = [];
+      }
+      if (!campaign.uniqueIds.includes(uniqueId)) {
+        campaign.uniqueIds.push(uniqueId);
+      }
+
       await campaign.save();
       console.log(`✅ Added unique ID ${uniqueId} to campaign ${campaign._id} with contactId: ${req.body.contactId || 'null'}`);
     }
@@ -3160,7 +3203,12 @@ router.get('/campaigns/:id/call-logs-dashboard', extractClientId, async (req, re
     // If a specific documentId is provided, return only its logs (convenience path)
     const documentId = req.query.documentId;
     if (documentId) {
-      if (!Array.isArray(campaign.uniqueIds) || !campaign.uniqueIds.includes(documentId)) {
+      const idsFromArray = Array.isArray(campaign.uniqueIds) ? campaign.uniqueIds.filter(Boolean) : [];
+      const idsFromDetails = Array.isArray(campaign.details)
+        ? campaign.details.map(d => d && d.uniqueId).filter(Boolean)
+        : [];
+      const knownIds = new Set([...idsFromArray, ...idsFromDetails]);
+      if (!knownIds.has(documentId)) {
         return res.status(404).json({ success: false, error: 'Document ID not found in this campaign' });
       }
 
@@ -3182,7 +3230,11 @@ router.get('/campaigns/:id/call-logs-dashboard', extractClientId, async (req, re
       });
     }
 
-    const uniqueIds = Array.isArray(campaign.uniqueIds) ? campaign.uniqueIds.filter(Boolean) : [];
+    const idsFromArray = Array.isArray(campaign.uniqueIds) ? campaign.uniqueIds.filter(Boolean) : [];
+    const idsFromDetails = Array.isArray(campaign.details)
+      ? campaign.details.map(d => d && d.uniqueId).filter(Boolean)
+      : [];
+    const uniqueIds = Array.from(new Set([...idsFromArray, ...idsFromDetails]));
     if (uniqueIds.length === 0) {
       return res.json({
         success: true,
@@ -3575,7 +3627,6 @@ router.get('/campaigns/:id/leads', extractClientId, async (req, res) => {
     return res.status(500).json({ success: false, error: 'Failed to fetch minimal leads list' });
   }
 });
-
 // Get merged call logs (completed + missed calls) with deduplication
 router.get('/campaigns/:id/merged-calls', extractClientId, async (req, res) => {
   try {
@@ -4268,6 +4319,11 @@ router.post('/campaigns/:id/start-calling', extractClientId, async (req, res) =>
       return res.status(400).json({ success: false, error: 'No API key found on agent' });
     }
 
+    // Fetch agent configuration for NGR pattern
+    const AgentConfig = require('../models/AgentConfig');
+    const agentConfig = await AgentConfig.findOne({ agentId }).lean();
+    console.log(`🔧 CAMPAIGN START: Agent config for ${agentId}:`, agentConfig);
+
     // Preflight for SANPBX/SNAPBX provider to surface errors early
     try {
       const provider = String(agent?.serviceProvider || '').toLowerCase();
@@ -4300,7 +4356,7 @@ router.post('/campaigns/:id/start-calling', extractClientId, async (req, res) =>
 
     // Start calling process in background with a runId for this instance
     const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    startCampaignCalling(campaign, agentId, apiKey, delayBetweenCalls, req.clientId, runId);
+    startCampaignCalling(campaign, agentId, apiKey, delayBetweenCalls, req.clientId, runId, agentConfig);
 
     // Telegram alert for campaign start
     // try {
@@ -4326,7 +4382,6 @@ router.post('/campaigns/:id/start-calling', extractClientId, async (req, res) =>
     res.status(500).json({ success: false, error: 'Failed to start campaign calling' });
   }
 });
-
 // Save or update WhatsApp chat history for a phone number (upsert by clientId+phoneNumber)
 router.post('/wa/chat/save', extractClientId, async (req, res) => {
   try {
@@ -4651,10 +4706,7 @@ router.post('/calls/single', extractClientId, async (req, res) => {
               await campaign.save();
               log('campaign.detail.appended', { campaignId, uniqueId: result.uniqueId });
             }
-            setTimeout(() => {
-              log('campaign.status.scheduleUpdate', { campaignId, uniqueId: result.uniqueId, delayMs: 40000 });
-              updateCallStatusFromLogs(campaign._id, result.uniqueId).catch(() => {});
-            }, 40000);
+            
           }
         } catch (e) {
           console.error('Failed to append single-call detail to campaign:', e);
@@ -4691,6 +4743,100 @@ router.post('/campaigns/:id/stop-calling', extractClientId, async (req, res) => 
     // Stop the calling process
     stopCampaignCalling(campaign._id.toString());
 
+    // Force save campaign history immediately when stopping
+    try {
+      const CampaignHistory = require('../models/CampaignHistory');
+      const CallLog = require('../models/CallLog');
+      
+      // Get the latest runId from campaign details
+      const campaignDetails = Array.isArray(campaign.details) ? campaign.details : [];
+      const latestDetail = campaignDetails
+        .filter(d => d && d.runId)
+        .sort((a, b) => new Date(b.time || 0) - new Date(a.time || 0))[0];
+      
+      if (latestDetail && latestDetail.runId) {
+        const runId = latestDetail.runId;
+        
+        // Get call logs for this run
+        const callLogs = await CallLog.find({
+          campaignId: campaign._id,
+          'metadata.customParams.runId': runId
+        }).lean();
+
+        // Build contacts array for history
+        const contactsById = new Map((campaign.contacts || []).map(c => [String(c._id || ''), c]));
+        const runDetails = campaignDetails.filter(d => d && d.runId === runId);
+        
+        const contacts = runDetails.map(d => {
+          const contact = contactsById.get(String(d.contactId || ''));
+          const callLog = callLogs.find(log => log.metadata?.customParams?.uniqueid === d.uniqueId);
+          
+          return {
+            documentId: d.uniqueId,
+            contactId: d.contactId,
+            number: contact?.phone || contact?.number || '',
+            name: contact?.name || '',
+            leadStatus: d.leadStatus || 'not_connected',
+            time: d.time ? d.time.toISOString() : new Date().toISOString(),
+            status: d.status || 'completed',
+            duration: d.callDuration || 0,
+            transcriptCount: callLog?.transcriptCount || 0,
+            whatsappMessageSent: callLog?.whatsappMessageSent || false,
+            whatsappRequested: callLog?.whatsappRequested || false
+          };
+        });
+
+        // Calculate stats
+        const totalContacts = contacts.length;
+        const successfulCalls = contacts.filter(c => c.leadStatus && c.leadStatus !== 'not_connected').length;
+        const failedCalls = contacts.filter(c => !c.leadStatus || c.leadStatus === 'not_connected').length;
+        const totalCallDuration = contacts.reduce((sum, c) => sum + (c.duration || 0), 0);
+        const averageCallDuration = totalContacts > 0 ? Math.round(totalCallDuration / totalContacts) : 0;
+
+        // Calculate run time
+        const startTime = runDetails.reduce((min, d) => {
+          const t = new Date(d.time || 0).getTime();
+          return Math.min(min, t);
+        }, Number.POSITIVE_INFINITY);
+        const endTime = new Date();
+        const elapsedSeconds = Math.floor((endTime - new Date(startTime)) / 1000);
+        const hours = Math.floor(elapsedSeconds / 3600);
+        const minutes = Math.floor((elapsedSeconds % 3600) / 60);
+        const seconds = elapsedSeconds % 60;
+
+        // Get instance number
+        const existingCount = await CampaignHistory.countDocuments({ campaignId: campaign._id });
+        const instanceNumber = existingCount + 1;
+
+        // Save to campaign history
+        await CampaignHistory.findOneAndUpdate(
+          { runId },
+          {
+            $setOnInsert: {
+              campaignId: campaign._id,
+              runId,
+              instanceNumber,
+              startTime: new Date(startTime).toISOString(),
+              status: 'running'
+            },
+            $set: {
+              endTime: endTime.toISOString(),
+              runTime: { hours, minutes, seconds },
+              status: 'completed',
+              contacts,
+              stats: { totalContacts, successfulCalls, failedCalls, totalCallDuration, averageCallDuration },
+              batchInfo: { isIntermediate: false }
+            }
+          },
+          { upsert: true, new: true }
+        );
+        
+        console.log(`💾 PARALLEL: Campaign history saved for run ${runId}`);
+      }
+    } catch (historyError) {
+      console.error(`❌ PARALLEL: Error saving campaign history:`, historyError);
+    }
+
     res.json({
       success: true,
       message: 'Campaign calling stopped',
@@ -4723,9 +4869,14 @@ router.get('/campaigns/:id/calling-status', extractClientId, async (req, res) =>
     // Note: progress.completedCalls counts initiated calls, not finalized, so do NOT use it here
     const details = Array.isArray(campaign.details) ? campaign.details : [];
     const initiatedCount = details.length;
+    const ringingCount = details.filter(d => d && d.status === 'ringing').length;
+    const ongoingCount = details.filter(d => d && d.status === 'ongoing').length;
     const hasActive = details.some(d => d && (d.status === 'ringing' || d.status === 'ongoing'));
     const completedCount = details.filter(d => d && d.status === 'completed').length;
     const allCallsFinalized = initiatedCount > 0 && !hasActive && completedCount === initiatedCount;
+
+    // Determine if campaign is actually running
+    const isActuallyRunning = campaign.isRunning && (hasActive || (callingProgress && callingProgress.isRunning));
 
     // Compute latestRunId and inferred runStartTime from details/progress
     let latestRunId = null;
@@ -4766,6 +4917,7 @@ router.get('/campaigns/:id/calling-status', extractClientId, async (req, res) =>
       // Campaign is marked as running but all calls are finalized - should be stopped
       newIsRunning = false;
       shouldUpdateIsRunning = true;
+      console.log(`🔄 BACKEND: Auto-stopping campaign ${id} - all calls finalized`);
     }
     // REMOVED: Auto-start logic that was overriding manual stops
     // Only auto-stop when all calls are finalized, don't auto-start
@@ -4781,11 +4933,17 @@ router.get('/campaigns/:id/calling-status', extractClientId, async (req, res) =>
       data: {
         campaignId: campaign._id,
         isRunning: newIsRunning,
+        isActuallyRunning,
+        allCallsFinalized,
+        hasActiveCalls: hasActive,
+        initiatedCount,
+        completedCount,
+        ringingCount,
+        ongoingCount,
         totalContacts: campaign.contacts.length,
         progress: callingProgress,
-        allCallsFinalized,
         latestRunId,
-        runStartTime
+        runStartTime: runStartTime ? runStartTime.toISOString() : null
       }
     });
 
@@ -5123,7 +5281,6 @@ router.put('/business/:id', extractClientId, async (req, res) => {
     res.status(500).json({ success: false, message: 'Failed to update business' });
   }
 });
-
 // DELETE: Delete a business by ID
 router.delete('/business/:id', extractClientId, async (req, res) => {
   try {
@@ -5901,7 +6058,6 @@ router.post('/register-user', async (req, res) => {
     });
   }
 });
-
 // Public route to get user by session ID
 router.get('/user/:sessionId', async (req, res) => {
   try {
@@ -6642,7 +6798,6 @@ router.get('/debug/test-failed-order', async (req, res) => {
     });
   }
 });
-
 // DEBUG: Test payment link creation with latest API
 router.get('/debug/cashfree-payment-link-test', async (req, res) => {
   try {
@@ -7286,7 +7441,6 @@ router.post('/payments/initiate', verifyClientOrAdminAndExtractClientId, async (
     res.status(500).json({ success: false, message: 'Failed to initiate payment' });
   }
 });
-
 // GET variant for browser redirects without Authorization header. Token passed as query param 't'.
 // 
 // Cashfree Direct Payment Link Flow:
@@ -7955,8 +8109,6 @@ router.post('/system/reset-circuit-breakers', extractClientId, async (req, res) 
     });
   }
 });
-
-
 // Call validation endpoint
 router.post('/calls/validate', authMiddleware, async (req, res) => {
   try {

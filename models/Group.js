@@ -48,6 +48,19 @@ const groupSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Agent'
   }],
+  // Ownership: who owns this group (client or humanAgent)
+  ownerType: {
+    type: String,
+    enum: ['client', 'humanAgent'],
+    required: false,
+    default: 'client',
+    index: true
+  },
+  ownerId: {
+    type: mongoose.Schema.Types.ObjectId,
+    required: false,
+    index: true
+  },
   clientId: {
     type: String,
     required: true,
@@ -74,3 +87,6 @@ groupSchema.pre('save', function(next) {
 });
 
 module.exports = mongoose.model('Group', groupSchema); 
+
+// Compound index for fast listing by ownership and recency
+groupSchema.index({ ownerType: 1, ownerId: 1, createdAt: -1 });

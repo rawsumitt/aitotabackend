@@ -11,10 +11,12 @@ const clientRoutes = require('./routes/clientroutes')
 const profileRoutes = require('./routes/profileroutes')
 const chatRoutes = require('./routes/chatroutes')
 const templateRoutes = require('./routes/templateroutes')
+const seriesCampaignRoutes = require('./routes/seriesCampaign')
 const agentAccessRoutes = require('./routes/agentAccessRoutes')
 const makecallRoutes = require('./routes/makecallRoutes')
 const sttRoutes = require('./routes/sttRoutes')
 const Business = require('./models/MyBussiness');
+const humanAgentRoutes = require('./routes/humanAgentRoutes');
 const { CLIENT_ID, CLIENT_SECRET, BASE_URL } = require('./config/cashfree');
 const jwt = require('jsonwebtoken');
 const app = express();
@@ -23,7 +25,6 @@ const Payment = require("./models/Payment");
 const server = http.createServer(app);
 // Campaign calling background services
 // Cashfree callback (return_url handler)
-
 
 // Import required modules (add these to your existing imports)
 
@@ -1187,12 +1188,14 @@ app.post('/api/v1/client/proxy/clicktobot', async (req, res) => {
 app.use('/api/v1/superadmin',superadminRoutes);
 app.use('/api/v1/admin',adminRoutes);
 app.use('/api/v1/client',clientRoutes);
+app.use('/api/v1/human-agent', humanAgentRoutes);
 app.use('/api/v1/auth/client/profile', profileRoutes);
 app.use('/api/v1/chat', chatRoutes);
 app.use('/api/v1/templates', templateRoutes);
 app.use('/api/v1/agent-access', agentAccessRoutes);
 app.use('/makecall', makecallRoutes);
 app.use('/api/v1/stt', sttRoutes);
+app.use('/api/v1/client/series-campaign', seriesCampaignRoutes);
 
 // Public API endpoint for business details (no authentication required)
 app.get('/api/v1/public/business/:identifier', async (req, res) => {
@@ -1356,6 +1359,130 @@ app.post("/api/v1/debug/fix-specific-call", async (req, res) => {
   } catch (error) {
     console.error('❌ Error fixing specific stuck call:', error);
     res.status(500).json({ error: 'Failed to fix stuck call', message: error.message });
+  }
+});
+
+// Agent configuration CRUD (admin)
+app.get('/api/v1/admin/agent-config', async (req, res) => {
+  try {
+    const AgentConfig = require('./models/AgentConfig');
+    const { agentId } = req.query;
+    const filter = agentId ? { agentId } : {};
+    const rows = await AgentConfig.find(filter).lean();
+    res.json({ success: true, data: rows });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+// Get agent configuration mode for campaigns (client access)
+app.get('/api/v1/client/agent-config/:agentId', async (req, res) => {
+  try {
+    const AgentConfig = require('./models/AgentConfig');
+    const { agentId } = req.params;
+    
+    console.log(`🔧 BACKEND: Fetching agent config for agentId: ${agentId}`);
+    
+    if (!agentId) {
+      return res.status(400).json({ success: false, message: 'Agent ID is required' });
+    }
+
+    const config = await AgentConfig.findOne({ agentId }).lean();
+    console.log(`🔧 BACKEND: Found config:`, config);
+    
+    if (!config) {
+      // Return default serial mode if no config exists
+      console.log(`🔧 BACKEND: No config found, returning default serial mode`);
+      return res.json({ 
+        success: true, 
+        data: { 
+          agentId, 
+          mode: 'serial', 
+          items: [],
+          isDefault: true 
+        } 
+      });
+    }
+
+    console.log(`🔧 BACKEND: Returning config with mode: ${config.mode}`);
+    res.json({ success: true, data: config });
+  } catch (e) {
+    console.error(`🔧 BACKEND: Error fetching agent config:`, e);
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+app.post('/api/v1/admin/agent-config', async (req, res) => {
+  try {
+    const AgentConfig = require('./models/AgentConfig');
+    const Agent = require('./models/Agent');
+    const { agentId, items, mode } = req.body || {};
+    if (!agentId) return res.status(400).json({ success: false, message: 'agentId is required' });
+    const agent = await Agent.findById(agentId).lean();
+    // Enforce single default
+    const normalizedItems = Array.isArray(items) ? items.map((it, idx) => ({ n: 1, g: Number(it.g)||1, rSec: Number(it.rSec)||5, isDefault: !!it.isDefault })) : [];
+    if (normalizedItems.length) {
+      let foundDefault = false;
+      for (let i = 0; i < normalizedItems.length; i++) {
+        if (normalizedItems[i].isDefault) {
+          if (!foundDefault) {
+            foundDefault = true;
+          } else {
+            normalizedItems[i].isDefault = false;
+          }
+        }
+      }
+      if (!foundDefault) normalizedItems[0].isDefault = true;
+    }
+    const payload = {
+      agentId,
+      agentName: agent?.agentName || '',
+      didNumber: agent?.didNumber || '',
+      mode: (mode === 'serial' ? 'serial' : 'parallel'),
+      items: normalizedItems
+    };
+    const doc = await AgentConfig.findOneAndUpdate({ agentId }, payload, { upsert: true, new: true, setDefaultsOnInsert: true });
+    res.json({ success: true, data: doc });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+app.put('/api/v1/admin/agent-config/:id', async (req, res) => {
+  try {
+    const AgentConfig = require('./models/AgentConfig');
+    const { id } = req.params;
+    const { items, mode } = req.body || {};
+    const normalizedItems = Array.isArray(items) ? items.map((it) => ({ n: 1, g: Number(it.g)||1, rSec: Number(it.rSec)||5, isDefault: !!it.isDefault })) : [];
+    if (normalizedItems.length) {
+      let foundDefault = false;
+      for (let i = 0; i < normalizedItems.length; i++) {
+        if (normalizedItems[i].isDefault) {
+          if (!foundDefault) {
+            foundDefault = true;
+          } else {
+            normalizedItems[i].isDefault = false;
+          }
+        }
+      }
+      if (!foundDefault) normalizedItems[0].isDefault = true;
+    }
+    const doc = await AgentConfig.findByIdAndUpdate(id, { items: normalizedItems, ...(mode ? { mode: (mode === 'serial' ? 'serial' : 'parallel') } : {}) }, { new: true });
+    if (!doc) return res.status(404).json({ success: false, message: 'Not found' });
+    res.json({ success: true, data: doc });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+app.delete('/api/v1/admin/agent-config/:id', async (req, res) => {
+  try {
+    const AgentConfig = require('./models/AgentConfig');
+    const { id } = req.params;
+    const r = await AgentConfig.findByIdAndDelete(id);
+    res.json({ success: true, deleted: !!r });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
   }
 });
 
