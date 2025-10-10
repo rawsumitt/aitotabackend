@@ -539,6 +539,18 @@ exports.deleteGroup = async (req, res) => {
 };
 
 // ============ Human Agent: Group Contacts (secured by ownership) ============
+exports.getGroupsContacts = async (req, res) =>{
+	try {
+		const { id } = req.params; // group id
+		const group = await Group.findById(id);
+		if (!group) return res.status(404).json({ success: false, error: 'Group not found' });
+		return res.json({ success: true, data: group.contacts || [] });
+	} catch (e) {
+		console.error('Error fetching group contacts (human-agent):', e);
+		return res.status(500).json({ success: false, error: 'Failed to fetch group contacts' });
+	}
+}
+
 exports.addContactToGroup = async (req, res) => {
 	try {
 		const candidates = await getClientIdCandidates(req.user);

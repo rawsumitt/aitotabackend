@@ -13,6 +13,7 @@ const {
 	updateGroup,
 	getGroup,
 	deleteGroup,
+  getGroupsContacts,
   addContactToGroup,
   bulkAddContactsToGroup,
   bulkDeleteContactsFromGroup,
@@ -45,6 +46,7 @@ router.get('/groups/:id', verifyClientOrHumanAgentToken, getGroup);
 router.put('/groups/:id', verifyClientOrHumanAgentToken, updateGroup);
 router.delete('/groups/:id', verifyClientOrHumanAgentToken, deleteGroup);
 // Contacts in group (human-agent secured)
+router.get('/groups/:id/contacts', verifyClientOrHumanAgentToken, getGroupsContacts);
 router.post('/groups/:id/contacts', verifyClientOrHumanAgentToken, addContactToGroup);
 router.post('/groups/:id/contacts/bulk-add', verifyClientOrHumanAgentToken, bulkAddContactsToGroup);
 router.post('/groups/:id/contacts/bulk-delete', verifyClientOrHumanAgentToken, bulkDeleteContactsFromGroup);
