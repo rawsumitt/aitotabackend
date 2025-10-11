@@ -5440,7 +5440,7 @@ router.delete('/business/:id', extractClientId, async (req, res) => {
 router.post('/dials', extractClientId, async(req,res)=>{
   try{
     const clientId = req.clientId;
-    const {category, phoneNumber, leadStatus ,contactName, date, other} = req.body;
+    const {category, phoneNumber, leadStatus ,contactName, date, other, duration} = req.body;
 
     if(!category || !phoneNumber || !contactName){
       return res.status(400).json({success: false, message: "Missing required fields. Required: category, phoneNumber, contactName"});
@@ -5453,13 +5453,14 @@ router.post('/dials', extractClientId, async(req,res)=>{
       phoneNumber,
       contactName,
       date,
-      other
+      other,
+      duration: duration || 0
     });
     res.status(201).json({success: true, data: dial});
 
   }catch(error){
     console.log(error);
-    return json.status(400)({sucess: true, message: "Failed to add dials"})
+    return res.status(400).json({success: false, message: "Failed to add dials"});
   }
 });
 

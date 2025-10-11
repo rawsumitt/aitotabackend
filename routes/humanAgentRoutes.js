@@ -3,6 +3,12 @@ const router = express.Router();
 const MyDials = require('../models/MyDials');
 const { verifyClientOrHumanAgentToken } = require('../middlewares/authmiddleware');
 const {
+	addDial,
+	getDialsReport,
+	getDialsLeads,
+	getDialsDone
+} = require('../controllers/humanAgentController');
+const {
 	getInboundReport,
 	getOutboundReport,
 	getInboundLogs,
@@ -74,14 +80,6 @@ router.get('/assigned-campaigns', verifyClientOrHumanAgentToken, getAssignedCamp
 router.get('/assigned-contacts', verifyClientOrHumanAgentToken, getAssignedContacts);
 
 // ===================== MY DIAL (Human Agent) ===============================
-
-// Add dial
-const {
-	addDial,
-	getDialsReport,
-	getDialsLeads,
-	getDialsDone
-} = require('../controllers/humanAgentController');
 
 router.post('/dials', verifyClientOrHumanAgentToken, addDial);
 

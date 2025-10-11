@@ -32,6 +32,10 @@ const MyDialSchema = new mongoose.Schema({
   },
   date:{
     type: String,
+  },
+  duration:{
+    type: Number,
+    default: 0
   }
 },{
     timestamps: true
