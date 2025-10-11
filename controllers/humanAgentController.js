@@ -1208,7 +1208,7 @@ exports.getAssignedCampaigns = async (req, res) => {
     // Get campaign details
     const campaignIds = Object.keys(campaignStats);
     const campaigns = await Campaign.find({ _id: { $in: campaignIds } })
-      .select('name description createdAt')
+      .select('name description category createdAt')
       .lean();
     
     const campaignMap = new Map(campaigns.map(c => [String(c._id), c]));
@@ -1224,6 +1224,7 @@ exports.getAssignedCampaigns = async (req, res) => {
         campaignId: stats.campaignId,
         campaignName: campaign?.name || 'Unknown Campaign',
         description: campaign?.description || '',
+        category: campaign?.category || '',
         totalAssignedContacts: stats.totalAssignedContacts,
         connectedContacts: stats.connectedContacts,
         notConnectedContacts: stats.notConnectedContacts,
