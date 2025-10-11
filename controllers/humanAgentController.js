@@ -1347,7 +1347,8 @@ exports.getAssignedContacts = async (req, res) => {
       data: contactsWithCampaignInfo,
       campaignInfo: {
         campaignId,
-        campaignName: campaign?.name || 'Unknown Campaign',
+		campaignCategory: campaign?.category || '',
+        campaignName: campaign?.name || '',
         campaignDescription: campaign?.description || ''
       },
       pagination: {
