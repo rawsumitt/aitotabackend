@@ -4098,7 +4098,7 @@ router.get('/campaigns/:id/merged-calls', extractClientId, async (req, res) => {
 });
 
 // Fetch transcript for a call by uniqueId (documentId)
-router.get('/campaigns/:id/logs/:documentId', extractClientId, async (req, res) => {
+router.get('/campaigns/:id/logs/:documentId', verifyClientOrHumanAgentToken, async (req, res) => {
   try {
     const { id } = req.params;
     const { documentId } = req.params;
