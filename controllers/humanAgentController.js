@@ -1,3 +1,227 @@
+// ===================== MY DIALS (Human Agent) ===============================
+const MyDials = require('../models/MyDials');
+
+exports.addDial = async (req, res) => {
+	try {
+		const humanAgentId = req.user.id;
+		const { category, phoneNumber, leadStatus, contactName, date, other } = req.body;
+		if (!category || !phoneNumber || !contactName) {
+			return res.status(400).json({ success: false, message: "Missing required fields. Required: category, phoneNumber, contactName" });
+		}
+		const dial = await MyDials.create({
+			humanAgentId,
+			clientId: req.user.clientId,
+			category,
+			leadStatus,
+			phoneNumber,
+			contactName,
+			date,
+			other
+		});
+		res.status(201).json({ success: true, data: dial });
+	} catch (error) {
+		console.log(error);
+		return res.status(400).json({ success: false, message: "Failed to add dials" });
+	}
+};
+
+exports.getDialsReport = async (req, res) => {
+	try {
+		const humanAgentId = req.user.id;
+		const { filter, startDate, endDate } = req.query;
+		const allowedFilters = ['today', 'yesterday', 'last7days'];
+		if (filter && !allowedFilters.includes(filter) && (!startDate || !endDate)) {
+			return res.status(400).json({ success: false, error: 'Invalid filter parameter', message: `Filter must be one of: ${allowedFilters.join(', ')} or provide both startDate and endDate`, allowedFilters });
+		}
+		let dateFilter = {};
+		if (filter === 'today') {
+			const today = new Date();
+			const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+			const endOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59, 999);
+			dateFilter = { createdAt: { $gte: startOfDay, $lte: endOfDay } };
+		} else if (filter === 'yesterday') {
+			const today = new Date();
+			const yesterday = new Date(today.getTime() - (24 * 60 * 60 * 1000));
+			const startOfYesterday = new Date(yesterday.getFullYear(), yesterday.getMonth(), yesterday.getDate());
+			const endOfYesterday = new Date(yesterday.getFullYear(), yesterday.getMonth(), yesterday.getDate(), 23, 59, 59, 999);
+			dateFilter = { createdAt: { $gte: startOfYesterday, $lte: endOfYesterday } };
+		} else if (filter === 'last7days') {
+			const today = new Date();
+			const sevenDaysAgo = new Date(today.getTime() - (7 * 24 * 60 * 60 * 1000));
+			dateFilter = { createdAt: { $gte: sevenDaysAgo, $lte: today } };
+		} else if (startDate && endDate) {
+			const start = new Date(startDate);
+			const end = new Date(endDate);
+			end.setHours(23, 59, 59, 999);
+			dateFilter = { createdAt: { $gte: start, $lte: end } };
+		}
+		const query = { humanAgentId, ...dateFilter };
+		const logs = await MyDials.find(query);
+		const totalCalls = logs.length;
+		const totalConnected = logs.filter(l => l.category === 'connected').length;
+		const totalNotConnected = logs.filter(l => l.category === 'not connected').length;
+		const totalConversationTime = logs.reduce((sum, l) => sum + (l.duration || 0), 0);
+		const avgCallDuration = totalCalls ? totalConversationTime / totalCalls : 0;
+		res.json({ success: true, data: { humanAgentId, totalCalls, totalConnected, totalNotConnected, totalConversationTime, avgCallDuration }, filter: { applied: filter || 'all', startDate: dateFilter.createdAt?.$gte, endDate: dateFilter.createdAt?.$lte } });
+	} catch (error) {
+		console.error('Error in /dials/report', error);
+		res.status(500).json({ error: 'Failed to fetch report' });
+	}
+};
+
+exports.getDialsLeads = async (req, res) => {
+	try {
+		const humanAgentId = req.user.id;
+		const { filter, startDate, endDate } = req.query;
+		const allowedFilters = ['today', 'yesterday', 'last7days'];
+		if (filter && !allowedFilters.includes(filter) && (!startDate || !endDate)) {
+			return res.status(400).json({ success: false, error: 'Invalid filter parameter', message: `Filter must be one of: ${allowedFilters.join(', ')} or provide both startDate and endDate`, allowedFilters });
+		}
+		let dateFilter = {};
+		if (filter === 'today') {
+			const today = new Date();
+			const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+			const endOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59, 999);
+			dateFilter = { createdAt: { $gte: startOfDay, $lte: endOfDay } };
+		} else if (filter === 'yesterday') {
+			const today = new Date();
+			const yesterday = new Date(today.getTime() - (24 * 60 * 60 * 1000));
+			const startOfYesterday = new Date(yesterday.getFullYear(), yesterday.getMonth(), yesterday.getDate());
+			const endOfYesterday = new Date(yesterday.getFullYear(), yesterday.getMonth(), yesterday.getDate(), 23, 59, 59, 999);
+			dateFilter = { createdAt: { $gte: startOfYesterday, $lte: endOfYesterday } };
+		} else if (filter === 'last7days') {
+			const today = new Date();
+			const sevenDaysAgo = new Date(today.getTime() - (7 * 24 * 60 * 60 * 1000));
+			dateFilter = { createdAt: { $gte: sevenDaysAgo, $lte: today } };
+		} else if (startDate && endDate) {
+			const start = new Date(startDate);
+			const end = new Date(endDate);
+			end.setHours(23, 59, 59, 999);
+			dateFilter = { createdAt: { $gte: start, $lte: end } };
+		}
+		const query = { humanAgentId, ...dateFilter };
+		const logs = await MyDials.find(query).sort({ createdAt: -1 });
+		// Group leads according to the new leadStatus structure
+		const leads = {
+			veryInterested: {
+				data: logs.filter(l => l.leadStatus === 'vvi' || l.leadStatus === 'very interested'),
+				count: logs.filter(l => l.leadStatus === 'vvi' || l.leadStatus === 'very interested').length
+			},
+			maybe: {
+				data: logs.filter(l => l.leadStatus === 'maybe' || l.leadStatus === 'medium'),
+				count: logs.filter(l => l.leadStatus === 'maybe' || l.leadStatus === 'medium').length
+			},
+			enrolled: {
+				data: logs.filter(l => l.leadStatus === 'enrolled'),
+				count: logs.filter(l => l.leadStatus === 'enrolled').length
+			},
+			junkLead: {
+				data: logs.filter(l => l.leadStatus === 'junk lead'),
+				count: logs.filter(l => l.leadStatus === 'junk lead').length
+			},
+			notRequired: {
+				data: logs.filter(l => l.leadStatus === 'not required'),
+				count: logs.filter(l => l.leadStatus === 'not required').length
+			},
+			enrolledOther: {
+				data: logs.filter(l => l.leadStatus === 'enrolled other'),
+				count: logs.filter(l => l.leadStatus === 'enrolled other').length
+			},
+			decline: {
+				data: logs.filter(l => l.leadStatus === 'decline'),
+				count: logs.filter(l => l.leadStatus === 'decline').length
+			},
+			notEligible: {
+				data: logs.filter(l => l.leadStatus === 'not eligible'),
+				count: logs.filter(l => l.leadStatus === 'not eligible').length
+			},
+			wrongNumber: {
+				data: logs.filter(l => l.leadStatus === 'wrong number'),
+				count: logs.filter(l => l.leadStatus === 'wrong number').length
+			},
+			hotFollowup: {
+				data: logs.filter(l => l.leadStatus === 'hot followup'),
+				count: logs.filter(l => l.leadStatus === 'hot followup').length
+			},
+			coldFollowup: {
+				data: logs.filter(l => l.leadStatus === 'cold followup'),
+				count: logs.filter(l => l.leadStatus === 'cold followup').length
+			},
+			schedule: {
+				data: logs.filter(l => l.leadStatus === 'schedule'),
+				count: logs.filter(l => l.leadStatus === 'schedule').length
+			},
+			notConnected: {
+				data: logs.filter(l => l.leadStatus === 'not connected'),
+				count: logs.filter(l => l.leadStatus === 'not connected').length
+			},
+			other: {
+				data: logs.filter(l => {
+					const predefinedStatuses = [
+						'vvi', 'very interested', 'maybe', 'medium', 'enrolled',
+						'junk lead', 'not required', 'enrolled other', 'decline',
+						'not eligible', 'wrong number', 'hot followup', 'cold followup',
+						'schedule', 'not connected'
+					];
+					return !predefinedStatuses.includes(l.leadStatus);
+				}),
+				count: logs.filter(l => {
+					const predefinedStatuses = [
+						'vvi', 'very interested', 'maybe', 'medium', 'enrolled',
+						'junk lead', 'not required', 'enrolled other', 'decline',
+						'not eligible', 'wrong number', 'hot followup', 'cold followup',
+						'schedule', 'not connected'
+					];
+					return !predefinedStatuses.includes(l.leadStatus);
+				}).length
+			}
+		};
+		res.json({ success: true, data: leads, filter: { applied: filter, startDate: dateFilter.createdAt?.$gte, endDate: dateFilter.createdAt?.$lte } });
+	} catch (error) {
+		console.error('Error in /dials/leads:', error);
+		res.status(500).json({ error: 'Failed to fetch leads' });
+	}
+};
+
+exports.getDialsDone = async (req, res) => {
+	try {
+		const humanAgentId = req.user.id;
+		const { filter, startDate, endDate } = req.query;
+		const allowedFilters = ['today', 'yesterday', 'last7days'];
+		if (filter && !allowedFilters.includes(filter) && !startDate && !endDate) {
+			return res.status(400).json({ error: 'Invalid filter parameter' });
+		}
+		let dateFilter = {};
+		if (filter === 'today') {
+			const today = new Date();
+			const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+			const endOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59, 999);
+			dateFilter = { createdAt: { $gte: startOfDay, $lte: endOfDay } };
+		} else if (filter === 'yesterday') {
+			const today = new Date();
+			const yesterday = new Date(today);
+			yesterday.setDate(today.getDate() - 1);
+			const startOfYesterday = new Date(yesterday.getFullYear(), yesterday.getMonth(), yesterday.getDate());
+			const endOfYesterday = new Date(yesterday.getFullYear(), yesterday.getMonth(), yesterday.getDate(), 23, 59, 59, 999);
+			dateFilter = { createdAt: { $gte: startOfYesterday, $lte: endOfYesterday } };
+		} else if (filter === 'last7days') {
+			const today = new Date();
+			const sevenDaysAgo = new Date(today);
+			sevenDaysAgo.setDate(today.getDate() - 7);
+			dateFilter = { createdAt: { $gte: sevenDaysAgo, $lte: today } };
+		} else if (startDate && endDate) {
+			const start = new Date(startDate);
+			const end = new Date(endDate);
+			end.setHours(23, 59, 59, 999);
+			dateFilter = { createdAt: { $gte: start, $lte: end } };
+		}
+		const query = { humanAgentId, category: 'sale_done', ...dateFilter };
+		const data = await MyDials.find(query).sort({ createdAt: -1 });
+		res.json({ success: true, data, filter: { applied: filter, startDate: dateFilter.createdAt?.$gte, endDate: dateFilter.createdAt?.$lte } });
+	} catch (error) {
+		res.status(500).json({ error: 'Failed to fetch done dials' });
+	}
+};
 const CallLog = require('../models/CallLog');
 const Client = require('../models/Client');
 const Group = require('../models/Group');
@@ -911,6 +1135,245 @@ exports.getHumanAgentsForAssignment = async (req, res) => {
   }
 };
 
+// Get campaigns with assigned contacts summary for human agent
+exports.getAssignedCampaigns = async (req, res) => {
+  try {
+    const humanAgentId = req.user.id;
+    const { filter, startDate, endDate } = req.query;
+    
+    // Validate filter parameters
+    const validation = validateFilter(filter, startDate, endDate);
+    if (validation) return res.status(400).json(validation);
+    
+    const dateFilter = buildDateFilter(filter, startDate, endDate);
+    
+    // Find campaign history documents where this human agent is assigned to contacts
+    const CampaignHistory = require('../models/CampaignHistory');
+    const Campaign = require('../models/Campaign');
+    
+    const campaignHistories = await CampaignHistory.find({
+      'contacts.assignedToHumanAgents.humanAgentId': humanAgentId,
+      ...dateFilter
+    }).lean();
+    
+    // Group contacts by campaign
+    const campaignStats = {};
+    
+    for (const history of campaignHistories) {
+      const campaignId = String(history.campaignId);
+      
+      if (!campaignStats[campaignId]) {
+        campaignStats[campaignId] = {
+          campaignId,
+          totalAssignedContacts: 0,
+          connectedContacts: 0,
+          notConnectedContacts: 0,
+          lastAssignedAt: null,
+          runIds: new Set()
+        };
+      }
+      
+      for (const contact of history.contacts || []) {
+        const isAssigned = contact.assignedToHumanAgents?.some(
+          assignment => String(assignment.humanAgentId) === String(humanAgentId)
+        );
+        
+        if (isAssigned) {
+          campaignStats[campaignId].totalAssignedContacts++;
+          campaignStats[campaignId].runIds.add(history.runId);
+          
+          // Check connection status
+          if (contact.leadStatus && !['not_connected'].includes(contact.leadStatus)) {
+            campaignStats[campaignId].connectedContacts++;
+          } else {
+            campaignStats[campaignId].notConnectedContacts++;
+          }
+          
+          // Get the assignment details for this human agent
+          const assignment = contact.assignedToHumanAgents.find(
+            assignment => String(assignment.humanAgentId) === String(humanAgentId)
+          );
+          
+          if (assignment?.assignedAt) {
+            const assignedAt = new Date(assignment.assignedAt);
+            if (!campaignStats[campaignId].lastAssignedAt || assignedAt > campaignStats[campaignId].lastAssignedAt) {
+              campaignStats[campaignId].lastAssignedAt = assignedAt;
+            }
+          }
+        }
+      }
+    }
+    
+    // Get campaign details
+    const campaignIds = Object.keys(campaignStats);
+    const campaigns = await Campaign.find({ _id: { $in: campaignIds } })
+      .select('name description createdAt')
+      .lean();
+    
+    const campaignMap = new Map(campaigns.map(c => [String(c._id), c]));
+    
+    // Build response
+    const assignedCampaigns = Object.values(campaignStats).map(stats => {
+      const campaign = campaignMap.get(stats.campaignId);
+      const connectionRate = stats.totalAssignedContacts > 0 
+        ? Math.round((stats.connectedContacts / stats.totalAssignedContacts) * 100) 
+        : 0;
+      
+      return {
+        campaignId: stats.campaignId,
+        campaignName: campaign?.name || 'Unknown Campaign',
+        description: campaign?.description || '',
+        totalAssignedContacts: stats.totalAssignedContacts,
+        connectedContacts: stats.connectedContacts,
+        notConnectedContacts: stats.notConnectedContacts,
+        connectionRate,
+        lastAssignedAt: stats.lastAssignedAt,
+        totalRuns: stats.runIds.size,
+        campaignCreatedAt: campaign?.createdAt
+      };
+    });
+    
+    // Sort by last assigned date (most recent first)
+    assignedCampaigns.sort((a, b) => new Date(b.lastAssignedAt) - new Date(a.lastAssignedAt));
+    
+    res.json({
+      success: true,
+      data: assignedCampaigns,
+      filter: { 
+        applied: filter || 'all', 
+        startDate: dateFilter.createdAt?.$gte, 
+        endDate: dateFilter.createdAt?.$lte 
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error fetching assigned campaigns for human agent:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch assigned campaigns'
+    });
+  }
+};
+
+// Get assigned contacts for specific campaign for human agent
+exports.getAssignedContacts = async (req, res) => {
+  try {
+    const humanAgentId = req.user.id;
+    const { campaignId, filter, startDate, endDate, page = 1, limit = 20 } = req.query;
+    
+    // Validate required campaignId
+    if (!campaignId) {
+      return res.status(400).json({
+        success: false,
+        error: 'campaignId is required'
+      });
+    }
+    
+    // Validate filter parameters
+    const validation = validateFilter(filter, startDate, endDate);
+    if (validation) return res.status(400).json(validation);
+    
+    const dateFilter = buildDateFilter(filter, startDate, endDate);
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+    
+    // Find campaign history documents for the specific campaign where this human agent is assigned to contacts
+    const CampaignHistory = require('../models/CampaignHistory');
+    const Campaign = require('../models/Campaign');
+    
+    const campaignHistories = await CampaignHistory.find({
+      campaignId: campaignId,
+      'contacts.assignedToHumanAgents.humanAgentId': humanAgentId,
+      ...dateFilter
+    }).lean();
+    
+    // Extract assigned contacts for this human agent from the specific campaign
+    let assignedContacts = [];
+    for (const history of campaignHistories) {
+      for (const contact of history.contacts || []) {
+        // Check if this contact is assigned to the current human agent
+        const isAssigned = contact.assignedToHumanAgents?.some(
+          assignment => String(assignment.humanAgentId) === String(humanAgentId)
+        );
+        
+        if (isAssigned) {
+          // Get the assignment details for this human agent
+          const assignment = contact.assignedToHumanAgents.find(
+            assignment => String(assignment.humanAgentId) === String(humanAgentId)
+          );
+          
+          assignedContacts.push({
+            ...contact,
+            campaignHistoryId: history._id,
+            campaignId: history.campaignId,
+            runId: history.runId,
+            instanceNumber: history.instanceNumber,
+            assignedAt: assignment?.assignedAt,
+            assignedBy: assignment?.assignedBy
+          });
+        }
+      }
+    }
+    
+    // Sort by assignment date (most recent first)
+    assignedContacts.sort((a, b) => new Date(b.assignedAt) - new Date(a.assignedAt));
+    
+    // Get total count for pagination
+    const totalCount = assignedContacts.length;
+    
+    // Apply pagination
+    const paginatedContacts = assignedContacts.slice(skip, skip + limitNum);
+    
+    // Get campaign details
+    const campaign = await Campaign.findById(campaignId)
+      .select('name description')
+      .lean();
+    
+    // Add campaign info to contacts
+    const contactsWithCampaignInfo = paginatedContacts.map(contact => ({
+      ...contact,
+      campaignName: campaign?.name || 'Unknown Campaign',
+      campaignDescription: campaign?.description || ''
+    }));
+    
+    const totalPages = Math.ceil(totalCount / limitNum);
+    const hasNextPage = pageNum < totalPages;
+    const hasPrevPage = pageNum > 1;
+    
+    res.json({
+      success: true,
+      data: contactsWithCampaignInfo,
+      campaignInfo: {
+        campaignId,
+        campaignName: campaign?.name || 'Unknown Campaign',
+        campaignDescription: campaign?.description || ''
+      },
+      pagination: {
+        currentPage: pageNum,
+        totalPages,
+        totalItems: totalCount,
+        itemsPerPage: limitNum,
+        hasNextPage,
+        hasPrevPage,
+        nextPage: hasNextPage ? pageNum + 1 : null,
+        prevPage: hasPrevPage ? pageNum - 1 : null
+      },
+      filter: { 
+        applied: filter || 'all', 
+        startDate: dateFilter.createdAt?.$gte, 
+        endDate: dateFilter.createdAt?.$lte 
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error fetching assigned contacts for human agent:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch assigned contacts'
+    });
+  }
+};
 // Export helper function
 module.exports.resolveClientUserId = resolveClientUserId;
 

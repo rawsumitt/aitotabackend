@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const MyDials = require('../models/MyDials');
 const { verifyClientOrHumanAgentToken } = require('../middlewares/authmiddleware');
 const {
 	getInboundReport,
@@ -21,7 +22,9 @@ const {
 	createCampaign,
 	attachGroupsToCampaign,
 	startCampaign,
-	singleCall
+	singleCall,
+	getAssignedCampaigns,
+	getAssignedContacts,
 } = require('../controllers/humanAgentController');
 
 // Import helper function
@@ -65,5 +68,30 @@ router.post('/groups/:groupId/assign', verifyClientOrHumanAgentToken, require('.
 
 // Get human agents for assignment - accessible by clients
 router.get('/human-agents', verifyClientOrHumanAgentToken, require('../controllers/humanAgentController').getHumanAgentsForAssignment);
+
+// Assigned campaigns and contacts for human agents
+router.get('/assigned-campaigns', verifyClientOrHumanAgentToken, getAssignedCampaigns);
+router.get('/assigned-contacts', verifyClientOrHumanAgentToken, getAssignedContacts);
+
+// ===================== MY DIAL (Human Agent) ===============================
+
+// Add dial
+const {
+	addDial,
+	getDialsReport,
+	getDialsLeads,
+	getDialsDone
+} = require('../controllers/humanAgentController');
+
+router.post('/dials', verifyClientOrHumanAgentToken, addDial);
+
+// Dials report
+router.get('/dials/report', verifyClientOrHumanAgentToken, getDialsReport);
+
+// Dials leads
+router.get('/dials/leads', verifyClientOrHumanAgentToken, getDialsLeads);
+
+// Dials done
+router.get('/dials/done', verifyClientOrHumanAgentToken, getDialsDone);
 
 module.exports = router;
