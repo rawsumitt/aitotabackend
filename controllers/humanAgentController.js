@@ -1,4 +1,7 @@
 // ===================== MY DIALS (Human Agent) ===============================
+const jwt = require('jsonwebtoken');
+const HumanAgent = require('../models/HumanAgent');
+const Profile = require('../models/Profile');
 const MyDials = require('../models/MyDials');
 
 exports.addDial = async (req, res) => {
@@ -1380,4 +1383,119 @@ exports.getAssignedContacts = async (req, res) => {
 // Export helper function
 module.exports.resolveClientUserId = resolveClientUserId;
 
+
+// List all client associations for the current human agent (by same email)
+exports.listMyClientAssociations = async (req, res) => {
+  try {
+    if (!req.user || req.user.userType !== 'humanAgent') {
+      return res.status(403).json({ success: false, message: 'Only human agent can view associations' });
+    }
+    const currentAgent = await HumanAgent.findById(req.user.id);
+    if (!currentAgent) {
+      return res.status(401).json({ success: false, message: 'Current agent not found' });
+    }
+    const agents = await HumanAgent.find({ email: currentAgent.email, isApproved: true })
+      .populate('clientId')
+      .lean();
+    const associations = agents.map(a => ({
+      humanAgentId: a._id,
+      clientId: a.clientId?._id || null,
+      clientUserId: a.clientId?.userId || null,
+      clientName: a.clientId?.businessName || a.clientId?.name || a.clientId?.email || null,
+      isApproved: !!a.isApproved,
+      isprofileCompleted: !!a.isprofileCompleted,
+      type: a.role
+    }));
+    return res.json({ success: true, associations });
+  } catch (e) {
+    console.error('listMyClientAssociations error:', e);
+    return res.status(500).json({ success: false, message: 'Failed to list associations' });
+  }
+};
+
+// ============ Human Agent: Switch across own client associations ============
+// Allows a human agent (self token) to switch to another client association of the same email
+// Requires: humanAgent token with allowSwitch === true
+exports.switchAgentContext = async (req, res) => {
+  try {
+    // Only humanAgent tokens can switch here
+    if (!req.user || req.user.userType !== 'humanAgent') {
+      return res.status(403).json({ success: false, message: 'Only human agent can switch context' });
+    }
+
+    // Ensure current token allows switching
+    try {
+      const authHeader = req.headers.authorization || '';
+      const bearer = authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : null;
+      if (!bearer) return res.status(401).json({ success: false, message: 'Missing token' });
+      const decoded = jwt.verify(bearer, process.env.JWT_SECRET);
+      const isHuman = decoded && decoded.userType === 'humanAgent';
+      const allowSwitch = decoded?.allowSwitch;
+      const legacyOk = typeof allowSwitch === 'undefined'; // backward-compat tokens
+      const aliasAccessTrue = decoded?.access === true; // alias if you used 'access'
+      if (!(isHuman && (allowSwitch === true || legacyOk || aliasAccessTrue))) {
+        return res.status(403).json({ success: false, message: 'Switch not allowed for this agent token' });
+      }
+    } catch (e) {
+      return res.status(401).json({ success: false, message: 'Invalid token' });
+    }
+
+    // Infer target agent id from body (accept profile object or minimal)
+    const body = req.body || {};
+    const targetId = body.id || body._id || body.humanAgentId;
+    if (!targetId) {
+      return res.status(400).json({ success: false, message: 'Target agent id is required' });
+    }
+
+    // Current agent email
+    const currentAgent = await HumanAgent.findById(req.user.id);
+    if (!currentAgent) {
+      return res.status(401).json({ success: false, message: 'Current agent not found' });
+    }
+
+    // Find target association by same email
+    const targetAgent = await HumanAgent.findOne({ _id: targetId, email: currentAgent.email }).populate('clientId');
+    if (!targetAgent) {
+      return res.status(404).json({ success: false, message: 'Target agent association not found for this email' });
+    }
+    if (!targetAgent.isApproved) {
+      return res.status(401).json({ success: false, message: 'Target agent association not approved' });
+    }
+    if (!targetAgent.clientId) {
+      return res.status(400).json({ success: false, message: 'Associated client not found' });
+    }
+
+    // Issue new humanAgent token (self) allowing further switches
+    const token = jwt.sign({ 
+      id: targetAgent._id, 
+      userType: 'humanAgent', 
+      clientId: targetAgent.clientId._id, 
+      email: targetAgent.email,
+      aud: 'humanAgent',
+      allowSwitch: true
+    }, process.env.JWT_SECRET, { expiresIn: '7d' });
+
+    const humanAgentProfileId = await Profile.findOne({ humanAgentId: targetAgent._id });
+    const clientProfileId = await Profile.findOne({ clientId: targetAgent.clientId._id });
+
+    return res.json({
+      success: true,
+      token,
+      userType: 'humanAgent',
+      id: targetAgent._id,
+      email: targetAgent.email,
+      name: targetAgent.humanAgentName,
+      isApproved: !!targetAgent.isApproved,
+      isprofileCompleted: !!targetAgent.isprofileCompleted,
+      clientId: targetAgent.clientId._id,
+      clientUserId: targetAgent.clientId.userId,
+      clientName: targetAgent.clientId.businessName || targetAgent.clientId.name || targetAgent.clientId.email,
+      humanAgentProfileId: humanAgentProfileId ? humanAgentProfileId._id : null,
+      clientProfileId: clientProfileId ? clientProfileId._id : null
+    });
+  } catch (error) {
+    console.error('switchAgentContext error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to switch agent context' });
+  }
+};
 

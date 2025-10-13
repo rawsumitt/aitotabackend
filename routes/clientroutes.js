@@ -234,6 +234,18 @@ router.post('/human-agent/login', loginHumanAgent);
 
 router.post('/google-login',verifyGoogleToken, googleLogin);
 
+// Multi-role Google discovery + selection (admin excluded)
+const { googleListApprovedProfiles, googleSelectProfile, listApprovedProfilesForCurrentUser, switchProfile, getHumanAgentToken } = require('../controllers/clientcontroller');
+router.post('/google/profiles', verifyGoogleToken, googleListApprovedProfiles);
+router.post('/google/select', verifyGoogleToken, googleSelectProfile);
+
+// Authenticated profile utilities
+router.get('/auth/profiles', authMiddleware, listApprovedProfilesForCurrentUser);
+router.post('/auth/switch', authMiddleware, switchProfile);
+
+// Client to HumanAgent impersonation (and also usable by admin with client context)
+router.get('/auth/human-agent-token/:agentId', verifyClientOrAdminAndExtractClientId, getHumanAgentToken);
+
 router.post('/register',verifyAdminTokenOnlyForRegister, registerClient);
 
 router.get('/profile', authMiddleware, getClientProfile);
@@ -2375,28 +2387,6 @@ router.post('/groups/:groupId/assign', extractClientId, async (req, res) => {
     res.status(500).json({ 
       success: false,
       error: 'Failed to assign group to human agents' 
-    });
-  }
-});
-
-// Get human agents for assignment (only client's human agents)
-router.get('/human-agents', extractClientId, async (req, res) => {
-  try {
-    const HumanAgent = require('../models/HumanAgent');
-    const humanAgents = await HumanAgent.find({ 
-      clientId: req.clientId,
-      isApproved: true 
-    }).select('humanAgentName email role createdAt').lean();
-
-    res.json({ 
-      success: true, 
-      data: humanAgents 
-    });
-  } catch (error) {
-    console.error('Error fetching human agents:', error);
-    res.status(500).json({ 
-      success: false,
-      error: 'Failed to fetch human agents' 
     });
   }
 });

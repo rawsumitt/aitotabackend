@@ -1,13 +1,15 @@
 const express = require('express');
 const router = express.Router();
 const MyDials = require('../models/MyDials');
-const { verifyClientOrHumanAgentToken } = require('../middlewares/authmiddleware');
+const { verifyClientOrHumanAgentToken, verifyHumanAgentToken } = require('../middlewares/authmiddleware');
 const {
 	addDial,
 	getDialsReport,
 	getDialsLeads,
 	getDialsDone
 } = require('../controllers/humanAgentController');
+const { switchAgentContext } = require('../controllers/humanAgentController');
+const { listMyClientAssociations } = require('../controllers/humanAgentController');
 const {
 	getInboundReport,
 	getOutboundReport,
@@ -78,6 +80,12 @@ router.get('/human-agents', verifyClientOrHumanAgentToken, require('../controlle
 // Assigned campaigns and contacts for human agents
 router.get('/assigned-campaigns', verifyClientOrHumanAgentToken, getAssignedCampaigns);
 router.get('/assigned-contacts', verifyClientOrHumanAgentToken, getAssignedContacts);
+
+// Agent → Agent switch (self-only, allowSwitch must be true)
+router.post('/switch', verifyHumanAgentToken, switchAgentContext);
+
+// Agent: list all client associations for this email
+router.get('/associations', verifyHumanAgentToken, listMyClientAssociations);
 
 // ===================== MY DIAL (Human Agent) ===============================
 
