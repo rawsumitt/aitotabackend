@@ -57,20 +57,39 @@ const listApprovedProfilesForCurrentUser = async (req, res) => {
       });
     }
 
-    // HumanAgents
-    const humanAgents = await HumanAgent.find({ email, isApproved: true }).populate('clientId');
-    for (const ha of humanAgents) {
-      if (!ha.clientId) continue;
-      profiles.push({
-        role: 'humanAgent',
-        id: ha._id,
-        clientId: ha.clientId._id,
-        clientUserId: ha.clientId.userId,
-        clientName: ha.clientId.businessName || ha.clientId.name || ha.clientId.email,
-        email: ha.email,
-        isApproved: !!ha.isApproved,
-        isprofileCompleted: !!ha.isprofileCompleted
-      });
+    // HumanAgents list policy
+    // - For client tokens: list ALL approved human agents under this client (regardless of email)
+    // - For non-client tokens: list approved human agents matching the same email (legacy behavior)
+    if (req.user?.userType === 'client') {
+      const clientScopedAgents = await HumanAgent.find({ clientId: req.user.id, isApproved: true }).populate('clientId');
+      for (const ha of clientScopedAgents) {
+        if (!ha.clientId) continue;
+        profiles.push({
+          role: 'humanAgent',
+          id: ha._id,
+          clientId: ha.clientId._id,
+          clientUserId: ha.clientId.userId,
+          clientName: ha.clientId.businessName || ha.clientId.name || ha.clientId.email,
+          email: ha.email,
+          isApproved: !!ha.isApproved,
+          isprofileCompleted: !!ha.isprofileCompleted
+        });
+      }
+    } else {
+      const humanAgents = await HumanAgent.find({ email, isApproved: true }).populate('clientId');
+      for (const ha of humanAgents) {
+        if (!ha.clientId) continue;
+        profiles.push({
+          role: 'humanAgent',
+          id: ha._id,
+          clientId: ha.clientId._id,
+          clientUserId: ha.clientId.userId,
+          clientName: ha.clientId.businessName || ha.clientId.name || ha.clientId.email,
+          email: ha.email,
+          isApproved: !!ha.isApproved,
+          isprofileCompleted: !!ha.isprofileCompleted
+        });
+      }
     }
 
     // Admin
@@ -81,6 +100,54 @@ const listApprovedProfilesForCurrentUser = async (req, res) => {
         id: admin._id,
         name: admin.name,
         email: admin.email
+      });
+    }
+
+    // If no profiles exist for this email, auto-onboard as a minimal client and return a client JWT
+    if (profiles.length === 0) {
+      // Create minimal client if not exists (unapproved, incomplete profile)
+      let existing = await Client.findOne({ email });
+      if (!existing) {
+        try {
+          const inferredName = String(email).split('@')[0];
+          existing = await Client.create({
+            name: inferredName,
+            email,
+            password: '',
+            isGoogleUser: false,
+            isprofileCompleted: false,
+            isApproved: false
+          });
+          // Best-effort: seed welcome credits
+          try {
+            const Credit = require("../models/Credit");
+            const creditRecord = await Credit.getOrCreateCreditRecord(existing._id);
+            if ((creditRecord?.currentBalance || 0) === 0) {
+              await creditRecord.addCredits(100, 'bonus', 'Welcome bonus credits');
+            }
+          } catch (_) {}
+        } catch (e) {
+          console.error('Auto-onboard client failed:', e);
+          return res.status(500).json({ success: false, message: 'Failed to auto-create profile' });
+        }
+      }
+
+      const token = jwt.sign({ id: existing._id, email: existing.email, userType: 'client' }, process.env.JWT_SECRET, { expiresIn: '7d' });
+      const profileId = await Profile.findOne({ clientId: existing._id });
+
+      return res.json({
+        success: true,
+        autoOnboard: true,
+        token,
+        userType: 'client',
+        id: existing._id,
+        email: existing.email,
+        name: existing.name,
+        clientUserId: existing.userId,
+        isApproved: !!existing.isApproved,
+        isprofileCompleted: !!existing.isprofileCompleted,
+        profileId: profileId ? profileId._id : null,
+        profiles: []
       });
     }
 
@@ -178,7 +245,7 @@ const switchProfile = async (req, res) => {
         if (!humanAgent.isApproved) return res.status(401).json({ success: false, message: 'Human agent not approved' });
         if (!humanAgent.clientId) return res.status(400).json({ success: false, message: 'Associated client not found' });
 
-        const jwtToken = jwt.sign({ id: humanAgent._id, userType: 'humanAgent', clientId: humanAgent.clientId._id, email: humanAgent.email, aud: 'humanAgent', allowSwitch: false, impersonatedBy: { type: 'client', id: String(clientIdCtx) } }, process.env.JWT_SECRET, { expiresIn: '1h' });
+        const jwtToken = jwt.sign({ id: humanAgent._id, userType: 'humanAgent', clientId: humanAgent.clientId._id, email: humanAgent.email, aud: 'humanAgent', allowSwitch: false, impersonatedBy: { type: 'client', id: String(clientIdCtx) } }, process.env.JWT_SECRET, { expiresIn: '1h' });``
         const humanAgentProfileId = await Profile.findOne({ humanAgentId: humanAgent._id });
         const clientProfileId = await Profile.findOne({ clientId: humanAgent.clientId._id });
 
@@ -268,6 +335,86 @@ const googleListApprovedProfiles = async (req, res) => {
         name: admin.name,
         email: admin.email
       });
+    }
+
+    // If nothing exists for this Google email, auto-onboard as minimal client
+    if (profiles.length === 0) {
+      let client = await Client.findOne({ email });
+      if (!client) {
+        try {
+          client = await Client.create({
+            name: req.googleUser.name || email.split('@')[0],
+            email,
+            password: '',
+            isGoogleUser: true,
+            googleId: req.googleUser.googleId,
+            googlePicture: req.googleUser.picture,
+            emailVerified: !!req.googleUser.emailVerified,
+            isprofileCompleted: false,
+            isApproved: false
+          });
+          // Seed default credits (best-effort)
+          try {
+            const Credit = require('../models/Credit');
+            const creditRecord = await Credit.getOrCreateCreditRecord(client._id);
+            if ((creditRecord?.currentBalance || 0) === 0) {
+              await creditRecord.addCredits(100, 'bonus', 'Welcome bonus credits');
+            }
+          } catch (_) {}
+        } catch (e) {
+          console.error('google/profiles auto-onboard failed:', e);
+          return res.status(500).json({ success: false, message: 'Failed to auto-create profile' });
+        }
+      }
+
+      const token = jwt.sign({ id: client._id, email: client.email, userType: 'client' }, process.env.JWT_SECRET, { expiresIn: '7d' });
+      const profileId = await Profile.findOne({ clientId: client._id });
+
+      return res.json({
+        success: true,
+        autoOnboard: true,
+        token,
+        userType: 'client',
+        id: client._id,
+        email: client.email,
+        name: client.name,
+        clientUserId: client.userId,
+        isApproved: !!client.isApproved,
+        isprofileCompleted: !!client.isprofileCompleted,
+        profileId: profileId ? profileId._id : null,
+        profiles: []
+      });
+    }
+
+    // If exactly one profile exists, directly issue a token for that role to skip selection
+    if (profiles.length === 1) {
+      const only = profiles[0];
+      if (only.role === 'client') {
+        const client = await Client.findOne({ _id: only.id, email });
+        if (client) {
+          const sameEmailAdmin = await Admin.findOne({ email });
+          const adminAccess = !!sameEmailAdmin;
+          const adminId = sameEmailAdmin ? String(sameEmailAdmin._id) : undefined;
+          const token = jwt.sign({ id: client._id, email: client.email, userType: 'client', adminAccess, adminId }, process.env.JWT_SECRET, { expiresIn: '7d' });
+          const profileId = await Profile.findOne({ clientId: client._id });
+          return res.json({ success: true, singleProfile: true, token, userType: 'client', id: client._id, email: client.email, name: client.name, clientUserId: client.userId, adminAccess, adminId, isApproved: !!client.isApproved, isprofileCompleted: !!client.isprofileCompleted, profileId: profileId ? profileId._id : null });
+        }
+      } else if (only.role === 'humanAgent') {
+        const humanAgent = await HumanAgent.findOne({ _id: only.id, email }).populate('clientId');
+        if (humanAgent && humanAgent.clientId && humanAgent.isApproved) {
+          const jwtToken = jwt.sign({ id: humanAgent._id, userType: 'humanAgent', clientId: humanAgent.clientId._id, email: humanAgent.email, aud: 'humanAgent', allowSwitch: true }, process.env.JWT_SECRET, { expiresIn: '7d' });
+          const humanAgentProfileId = await Profile.findOne({ humanAgentId: humanAgent._id });
+          const clientProfileId = await Profile.findOne({ clientId: humanAgent.clientId._id });
+          return res.json({ success: true, singleProfile: true, token: jwtToken, userType: 'humanAgent', id: humanAgent._id, email: humanAgent.email, name: humanAgent.humanAgentName, isApproved: !!humanAgent.isApproved, isprofileCompleted: !!humanAgent.isprofileCompleted, clientId: humanAgent.clientId._id, clientUserId: humanAgent.clientId.userId, clientName: humanAgent.clientId.businessName || humanAgent.clientId.name || humanAgent.clientId.email, humanAgentProfileId: humanAgentProfileId ? humanAgentProfileId._id : null, clientProfileId: clientProfileId ? clientProfileId._id : null });
+        }
+      } else if (only.role === 'admin') {
+        const admin = await Admin.findOne({ _id: only.id, email });
+        if (admin) {
+          const token = jwt.sign({ id: admin._id, userType: 'admin', email: admin.email }, process.env.JWT_SECRET, { expiresIn: '7d' });
+          return res.json({ success: true, singleProfile: true, token, userType: 'admin', id: admin._id, email: admin.email, name: admin.name });
+        }
+      }
+      // Fallback to listing if validation failed
     }
 
     return res.json({ success: true, profiles });

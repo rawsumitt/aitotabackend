@@ -8,8 +8,7 @@ const {
 	getDialsLeads,
 	getDialsDone
 } = require('../controllers/humanAgentController');
-const { switchAgentContext } = require('../controllers/humanAgentController');
-const { listMyClientAssociations } = require('../controllers/humanAgentController');
+const { listMyClientAssociations, switchAgentContext } = require('../controllers/humanAgentController');
 const {
 	getInboundReport,
 	getOutboundReport,

@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 
 const Campaign = require('../models/Campaign');
+const Client = require('../models/Client');
 const CallLog = require('../models/CallLog');
 const Agent = require('../models/Agent');
 const { makeSingleCall } = require('../services/campaignCallingService');
@@ -445,8 +446,11 @@ async function runSeries({ campaignId, agentId, apiKey, clientId, minDelayMs = 4
   return { started: true, runId };
 }
 
+// Auth helper to resolve client context for admin/client tokens
+const { verifyClientOrAdminAndExtractClientId } = require('../middlewares/authmiddleware');
+
 // Start sequential campaign calling
-router.post('/start', async (req, res) => {
+router.post('/start', verifyClientOrAdminAndExtractClientId, async (req, res) => {
   try {
     const { campaignId, agentId, apiKey, clientId, minDelayMs } = req.body || {};
     if (!campaignId) return res.status(400).json({ error: 'campaignId is required' });
@@ -464,8 +468,31 @@ router.post('/start', async (req, res) => {
       sequentialRuns.delete(String(campaignId));
     }
 
-    // Start in background
-    runSeries({ campaignId, agentId: agentId || null, apiKey: apiKey || null, clientId: clientId || null, minDelayMs: Math.max(5000, Number(minDelayMs) || 5000) })
+    // Start in background (serial mode here). Send alert before starting.
+    try {
+      const { sendCampaignStartAlert } = require('../utils/telegramAlert');
+      const clientMongoId = req.clientId || clientId || null;
+      const campaignDoc = await Campaign.findById(campaignId).lean();
+      // Resolve client doc robustly: try _id, then userId, then from campaign
+      let client = null;
+      if (clientMongoId) {
+        client = await Client.findById(clientMongoId).lean();
+        if (!client) client = await Client.findOne({ _id: clientMongoId }).lean();
+      }
+      if (!client && campaignDoc?.clientId) {
+        try { client = await Client.findById(campaignDoc.clientId).lean(); } catch (_) {}
+      } 
+      // Final fallback: try current authenticated client's id (from middleware)
+      if (!client && req.user?.userType === 'client' && req.user?.id) {
+        try { client = await Client.findById(req.user.id).lean(); } catch (_) {}
+      }
+      await sendCampaignStartAlert({
+        campaignName: campaignDoc?.name || String(campaignId),
+        clientName: client?.businessName || client?.name || client?.email || String(clientMongoId || campaignDoc?.clientId || ''),
+        mode: 'serial'
+      });
+    } catch (_) {}
+    runSeries({ campaignId, agentId: agentId || null, apiKey: apiKey || null, clientId: (req.clientId || clientId || null), minDelayMs: Math.max(5000, Number(minDelayMs) || 5000) })
       .catch(() => {})
       .finally(() => {});
 
