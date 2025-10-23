@@ -4486,16 +4486,7 @@ router.post('/campaigns/:id/start-calling', extractClientId, async (req, res) =>
     const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     startCampaignCalling(campaign, agentId, apiKey, delayBetweenCalls, req.clientId, runId, agentConfig);
 
-    // Telegram alert for campaign start (parallel mode here)
-    try {
-      const { sendCampaignStartAlert } = require('../utils/telegramAlert');
-      const client = await Client.findById(req.clientId).lean();
-      await sendCampaignStartAlert({
-        campaignName: campaign.name,
-        clientName: client?.name || client?.businessName || client?.email || 'Unknown Client',
-        mode: 'parallel'
-      });
-    } catch (_) {}
+    // Start alert now handled centrally in campaignCallingService.startCampaignCalling
 
     res.json({
       success: true,

@@ -300,7 +300,7 @@ const googleListApprovedProfiles = async (req, res) => {
     const client = await Client.findOne({ email, isApproved: true });
     if (client) {
       profiles.push({
-        role: 'client',
+        userType: 'client',
         id: client._id,
         clientUserId: client.userId,
         name: client.name,
@@ -315,8 +315,9 @@ const googleListApprovedProfiles = async (req, res) => {
     for (const ha of humanAgents) {
       if (!ha.clientId) continue;
       profiles.push({
-        role: 'humanAgent',
+        userType: 'humanAgent',
         id: ha._id,
+        role: ha.role,
         clientId: ha.clientId._id,
         clientUserId: ha.clientId.userId,
         clientName: ha.clientId.businessName || ha.clientId.name || ha.clientId.email,
@@ -330,7 +331,7 @@ const googleListApprovedProfiles = async (req, res) => {
     const admin = await Admin.findOne({ email });
     if (admin) {
       profiles.push({
-        role: 'admin',
+        userType: 'admin',
         id: admin._id,
         name: admin.name,
         email: admin.email
@@ -389,7 +390,7 @@ const googleListApprovedProfiles = async (req, res) => {
     // If exactly one profile exists, directly issue a token for that role to skip selection
     if (profiles.length === 1) {
       const only = profiles[0];
-      if (only.role === 'client') {
+      if (only.userType === 'client') {
         const client = await Client.findOne({ _id: only.id, email });
         if (client) {
           const sameEmailAdmin = await Admin.findOne({ email });
@@ -399,15 +400,15 @@ const googleListApprovedProfiles = async (req, res) => {
           const profileId = await Profile.findOne({ clientId: client._id });
           return res.json({ success: true, singleProfile: true, token, userType: 'client', id: client._id, email: client.email, name: client.name, clientUserId: client.userId, adminAccess, adminId, isApproved: !!client.isApproved, isprofileCompleted: !!client.isprofileCompleted, profileId: profileId ? profileId._id : null });
         }
-      } else if (only.role === 'humanAgent') {
+      } else if (only.userType === 'humanAgent') {
         const humanAgent = await HumanAgent.findOne({ _id: only.id, email }).populate('clientId');
         if (humanAgent && humanAgent.clientId && humanAgent.isApproved) {
           const jwtToken = jwt.sign({ id: humanAgent._id, userType: 'humanAgent', clientId: humanAgent.clientId._id, email: humanAgent.email, aud: 'humanAgent', allowSwitch: true }, process.env.JWT_SECRET, { expiresIn: '7d' });
           const humanAgentProfileId = await Profile.findOne({ humanAgentId: humanAgent._id });
           const clientProfileId = await Profile.findOne({ clientId: humanAgent.clientId._id });
-          return res.json({ success: true, singleProfile: true, token: jwtToken, userType: 'humanAgent', id: humanAgent._id, email: humanAgent.email, name: humanAgent.humanAgentName, isApproved: !!humanAgent.isApproved, isprofileCompleted: !!humanAgent.isprofileCompleted, clientId: humanAgent.clientId._id, clientUserId: humanAgent.clientId.userId, clientName: humanAgent.clientId.businessName || humanAgent.clientId.name || humanAgent.clientId.email, humanAgentProfileId: humanAgentProfileId ? humanAgentProfileId._id : null, clientProfileId: clientProfileId ? clientProfileId._id : null });
+          return res.json({ success: true, singleProfile: true, token: jwtToken, userType: 'humanAgent', id: humanAgent._id, email: humanAgent.email, name: humanAgent.humanAgentName, role: humanAgent.role, isApproved: !!humanAgent.isApproved, isprofileCompleted: !!humanAgent.isprofileCompleted, clientId: humanAgent.clientId._id, clientUserId: humanAgent.clientId.userId, clientName: humanAgent.clientId.businessName || humanAgent.clientId.name || humanAgent.clientId.email, humanAgentProfileId: humanAgentProfileId ? humanAgentProfileId._id : null, clientProfileId: clientProfileId ? clientProfileId._id : null });
         }
-      } else if (only.role === 'admin') {
+      } else if (only.userType === 'admin') {
         const admin = await Admin.findOne({ _id: only.id, email });
         if (admin) {
           const token = jwt.sign({ id: admin._id, userType: 'admin', email: admin.email }, process.env.JWT_SECRET, { expiresIn: '7d' });
@@ -433,19 +434,19 @@ const googleSelectProfile = async (req, res) => {
     const email = String(req.googleUser.email).toLowerCase();
 
     // Accept either { role, id } OR full profile object previously returned
-    let role = req.body?.role;
+    let userType = req.body?.userType;
     let id = req.body?.id;
     const bodyHasProfileShape = req.body && typeof req.body === 'object' && (req.body.role && req.body.id && req.body.email);
     if (bodyHasProfileShape) {
-      role = req.body.role;
+      userType = req.body.userType;
       id = req.body.id;
       // For humanAgent, clientId may be present in body; we will validate against DB
     }
-    if (!role || !id) {
-      return res.status(400).json({ success: false, message: 'role and id are required' });
+    if (!userType || !id) {
+      return res.status(400).json({ success: false, message: 'userType and id are required' });
     }
 
-    if (role === 'client') {
+    if (userType === 'client') {
       const client = await Client.findOne({ _id: id, email });
       if (!client) {
         return res.status(404).json({ success: false, message: 'Client not found for this email' });
@@ -484,7 +485,7 @@ const googleSelectProfile = async (req, res) => {
       });
     }
 
-    if (role === 'humanAgent') {
+    if (userType === 'humanAgent') {
       const humanAgent = await HumanAgent.findOne({ _id: id, email }).populate('clientId');
       if (!humanAgent) {
         return res.status(404).json({ success: false, message: 'Human agent not found for this email' });
@@ -506,6 +507,7 @@ const googleSelectProfile = async (req, res) => {
         token: jwtToken,
         userType: 'humanAgent',
         id: humanAgent._id,
+        role: humanAgent.role,
         email: humanAgent.email,
         name: humanAgent.humanAgentName,
         isApproved: !!humanAgent.isApproved,
@@ -518,7 +520,7 @@ const googleSelectProfile = async (req, res) => {
       });
     }
 
-    if (role === 'admin') {
+    if (userType === 'admin') {
       const admin = await Admin.findOne({ _id: id, email });
       if (!admin) {
         return res.status(404).json({ success: false, message: 'Admin not found for this email' });

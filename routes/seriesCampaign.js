@@ -5,6 +5,7 @@ const Campaign = require('../models/Campaign');
 const Client = require('../models/Client');
 const CallLog = require('../models/CallLog');
 const Agent = require('../models/Agent');
+const Group = require('../models/Group');
 const { makeSingleCall } = require('../services/campaignCallingService');
 const axios = require('axios');
 const serviceUtils = require('../services/campaignCallingService'); // for getClientApiKey
@@ -440,6 +441,50 @@ async function runSeries({ campaignId, agentId, apiKey, clientId, minDelayMs = 4
     );
 
     console.log(`💾 SERIES: Auto-saved run to CampaignHistory (success=${successfulCalls}, failed=${failedCalls}) for campaign=${campaignId}`);
+
+    // Send STOP alert (serial) after history saved
+    try {
+      const { sendCampaignStopAlert } = require('../utils/telegramAlert');
+      const client = await Client.findById(clientId || fresh.clientId).lean();
+      // Resolve agent name
+      let agentName = '';
+      let agentDid = '';
+      try {
+        const ag = agent || (await Agent.findById(agentId).lean());
+        agentName = ag?.name || ag?.agentName || ag?.email || '';
+        agentDid = ag?.didNumber || '';
+      } catch (_) {}
+      // Resolve group name (first)
+      let groupName = '';
+      try {
+        const firstGroupId = Array.isArray(fresh.groupIds) && fresh.groupIds.length > 0 ? fresh.groupIds[0] : null;
+        if (firstGroupId) {
+          const gr = await Group.findById(firstGroupId).lean();
+          groupName = gr?.name || gr?.groupName || '';
+        }
+      } catch (_) {}
+      const connectedPercent = totalContacts > 0 ? Math.round((successfulCalls / totalContacts) * 100) : 0;
+      const payload = {
+        campaignName: fresh.name || String(campaignId),
+        campaignId: String(campaignId),
+        agentName,
+        groupName,
+        did: agentDid || '',
+        totalContacts,
+        startTime,
+        endTime,
+        clientName: client?.businessName || client?.name || '',
+        loginEmail: client?.email || '',
+        totalConnected: successfulCalls,
+        totalNotConnected: failedCalls,
+        connectedPercent,
+        mode: 'serial',
+        durationMs: (endTime - startTime)
+      };
+      console.log('📣 SERIES: Sending STOP alert payload →', JSON.stringify(payload));
+      await sendCampaignStopAlert(payload);
+      console.log('✅ SERIES: STOP alert sent');
+    } catch (e) { console.warn('⚠️ SERIES: STOP alert failed:', e?.message); }
   } catch (e) {
     console.log(`⚠️ SERIES: Auto-save failed: ${e?.message || e}`);
   }
@@ -468,11 +513,12 @@ router.post('/start', verifyClientOrAdminAndExtractClientId, async (req, res) =>
       sequentialRuns.delete(String(campaignId));
     }
 
-    // Start in background (serial mode here). Send alert before starting.
+    // Start in background (serial mode here). Send enriched Telegram alert before starting.
     try {
       const { sendCampaignStartAlert } = require('../utils/telegramAlert');
       const clientMongoId = req.clientId || clientId || null;
       const campaignDoc = await Campaign.findById(campaignId).lean();
+      const totalContacts = Array.isArray(campaignDoc?.contacts) ? campaignDoc.contacts.length : 0;
       // Resolve client doc robustly: try _id, then userId, then from campaign
       let client = null;
       if (clientMongoId) {
@@ -486,9 +532,39 @@ router.post('/start', verifyClientOrAdminAndExtractClientId, async (req, res) =>
       if (!client && req.user?.userType === 'client' && req.user?.id) {
         try { client = await Client.findById(req.user.id).lean(); } catch (_) {}
       }
+      // Resolve agent name
+      let resolvedAgentId = agentId;
+      if (!resolvedAgentId) {
+        try { resolvedAgentId = Array.isArray(campaignDoc?.agent) && campaignDoc.agent.length > 0 ? campaignDoc.agent[0] : null; } catch (_) {}
+      }
+      let agentName = '';
+      let agentDid = '';
+      if (resolvedAgentId) {
+        try {
+          const ag = await Agent.findById(resolvedAgentId).lean();
+          agentName = ag?.name || ag?.agentName || ag?.email || '';
+          agentDid = ag?.didNumber || '';
+        } catch (_) {}
+      }
+      // Resolve group name (first)
+      let groupName = '';
+      try {
+        const firstGroupId = Array.isArray(campaignDoc?.groupIds) && campaignDoc.groupIds.length > 0 ? campaignDoc.groupIds[0] : null;
+        if (firstGroupId) {
+          const gr = await Group.findById(firstGroupId).lean();
+          groupName = gr?.name || gr?.groupName || '';
+        }
+      } catch (_) {}
+
       await sendCampaignStartAlert({
         campaignName: campaignDoc?.name || String(campaignId),
+        agentName,
+        groupName,
+        totalContacts,
+        startTime: new Date(),
         clientName: client?.businessName || client?.name || client?.email || String(clientMongoId || campaignDoc?.clientId || ''),
+        loginEmail: req.user?.email || client?.email || '',
+        did: agentDid || '',
         mode: 'serial'
       });
     } catch (_) {}

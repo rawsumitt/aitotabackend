@@ -7,22 +7,40 @@ const MyDials = require('../models/MyDials');
 exports.addDial = async (req, res) => {
 	try {
 		const humanAgentId = req.user.id;
-		const { category, phoneNumber, leadStatus, contactName, date, other, duration } = req.body;
-		if (!category || !phoneNumber || !contactName) {
-			return res.status(400).json({ success: false, message: "Missing required fields. Required: category, phoneNumber, contactName" });
-		}
-		const dial = await MyDials.create({
-			humanAgentId,
-			clientId: req.user.clientId,
-			category,
-			leadStatus,
-			phoneNumber,
-			contactName,
-			date,
-			other,
-			duration: duration || 0
-		});
-		res.status(201).json({ success: true, data: dial });
+    const { category, phoneNumber, leadStatus, contactName, date, other, duration } = req.body;
+    // Only category and phoneNumber are mandatory; contactName is optional
+    if (!category || !phoneNumber) {
+      return res.status(400).json({ success: false, message: "Missing required fields. Required: category and phoneNumber" });
+    }
+    // Upsert: ensure only one record per (humanAgentId + phoneNumber). Subsequent saves update same record.
+    const existing = await MyDials.findOne({ humanAgentId, phoneNumber });
+    let action = 'created';
+    let dial;
+    if (existing) {
+      existing.category = category;
+      existing.leadStatus = leadStatus;
+      if (typeof contactName !== 'undefined') existing.contactName = contactName;
+      if (date) existing.date = date;
+      if (typeof duration !== 'undefined') existing.duration = duration || 0;
+      if (other !== undefined) existing.other = other;
+      await existing.save();
+      dial = existing;
+      action = 'updated';
+    } else {
+      dial = await MyDials.create({
+        humanAgentId,
+        clientId: req.user.clientId,
+        category,
+        leadStatus,
+        phoneNumber,
+        contactName: contactName || '',
+        date,
+        other,
+        duration: duration || 0
+      });
+      action = 'created';
+    }
+    res.status(existing ? 200 : 201).json({ success: true, data: dial, action });
 	} catch (error) {
 		console.log(error);
 		return res.status(400).json({ success: false, message: "Failed to add dials" });
@@ -1173,7 +1191,8 @@ exports.getAssignedCampaigns = async (req, res) => {
           connectedContacts: 0,
           notConnectedContacts: 0,
           lastAssignedAt: null,
-          runIds: new Set()
+          runIds: new Set(),
+          phoneSet: new Set()
         };
       }
       
@@ -1192,6 +1211,12 @@ exports.getAssignedCampaigns = async (req, res) => {
           } else {
             campaignStats[campaignId].notConnectedContacts++;
           }
+
+          // Track phone numbers for updated-by-me computation
+          const raw = String(contact.number || '').trim();
+          const digits = raw.replace(/[^0-9]/g, '');
+          const plusPref = digits ? `+${digits}` : raw;
+          [raw, digits, plusPref].filter(Boolean).forEach(p => campaignStats[campaignId].phoneSet.add(p));
           
           // Get the assignment details for this human agent
           const assignment = contact.assignedToHumanAgents.find(
@@ -1217,13 +1242,25 @@ exports.getAssignedCampaigns = async (req, res) => {
     const campaignMap = new Map(campaigns.map(c => [String(c._id), c]));
     
     // Build response
-    const assignedCampaigns = Object.values(campaignStats).map(stats => {
+    const assignedCampaigns = [];
+
+    for (const stats of Object.values(campaignStats)) {
+      // Compute updated-by-me count using MyDials with phone set
+      let updatedByMe = 0;
+      try {
+        const MyDialsModel = require('../models/MyDials');
+        const phoneArr = Array.from(stats.phoneSet);
+        if (phoneArr.length > 0) {
+          updatedByMe = await MyDialsModel.countDocuments({ humanAgentId, phoneNumber: { $in: phoneArr } });
+        }
+      } catch (_) {}
+
       const campaign = campaignMap.get(stats.campaignId);
       const connectionRate = stats.totalAssignedContacts > 0 
         ? Math.round((stats.connectedContacts / stats.totalAssignedContacts) * 100) 
         : 0;
-      
-      return {
+
+      assignedCampaigns.push({
         campaignId: stats.campaignId,
         campaignName: campaign?.name || 'Unknown Campaign',
         description: campaign?.description || '',
@@ -1234,9 +1271,10 @@ exports.getAssignedCampaigns = async (req, res) => {
         connectionRate,
         lastAssignedAt: stats.lastAssignedAt,
         totalRuns: stats.runIds.size,
-        campaignCreatedAt: campaign?.createdAt
-      };
-    });
+        campaignCreatedAt: campaign?.createdAt,
+        updatedByMe
+      });
+    }
     
     // Sort by last assigned date (most recent first)
     assignedCampaigns.sort((a, b) => new Date(b.lastAssignedAt) - new Date(a.lastAssignedAt));
@@ -1308,6 +1346,20 @@ exports.getAssignedContacts = async (req, res) => {
             assignment => String(assignment.humanAgentId) === String(humanAgentId)
           );
           
+          // Fetch latest disposition from MyDials for this agent+phone (normalize phone formats)
+          let currentDisposition = null;
+          try {
+            const raw = String(contact.number || '').trim();
+            const digits = raw.replace(/[^0-9]/g, '');
+            const plusPref = digits ? `+${digits}` : raw;
+            const phoneCandidates = Array.from(new Set([raw, digits, plusPref].filter(Boolean)));
+            const MyDialsModel = require('../models/MyDials');
+            const d = await MyDialsModel.findOne({ humanAgentId, phoneNumber: { $in: phoneCandidates } })
+              .sort({ updatedAt: -1 })
+              .lean();
+            currentDisposition = d?.leadStatus || null;
+          } catch (_) {}
+
           assignedContacts.push({
             ...contact,
             campaignHistoryId: history._id,
@@ -1315,7 +1367,9 @@ exports.getAssignedContacts = async (req, res) => {
             runId: history.runId,
             instanceNumber: history.instanceNumber,
             assignedAt: assignment?.assignedAt,
-            assignedBy: assignment?.assignedBy
+            assignedBy: assignment?.assignedBy,
+            // Prefer latest disposition saved by agent over history value
+            leadStatus: currentDisposition || contact.leadStatus || null
           });
         }
       }
@@ -1382,6 +1436,51 @@ exports.getAssignedContacts = async (req, res) => {
 };
 // Export helper function
 module.exports.resolveClientUserId = resolveClientUserId;
+// Human Agent KPI for client list view: assigned count and updated-by-agent count
+exports.getAgentDispositionStats = async (req, res) => {
+  try {
+    const clientId = await resolveClientUserId(req.user);
+    const { humanAgentId } = req.query;
+    if (!humanAgentId) return res.status(400).json({ success: false, message: 'humanAgentId is required' });
+
+    // Count assigned contacts across campaign histories for this client and agent
+    const CampaignHistory = require('../models/CampaignHistory');
+    // Pull phone numbers assigned to this humanAgent across histories
+    const histories = await CampaignHistory.find({ 'contacts.assignedToHumanAgents.humanAgentId': humanAgentId })
+      .select('contacts')
+      .lean();
+
+    let assignedCount = 0;
+    const phoneSet = new Set();
+    for (const h of histories) {
+      for (const c of h.contacts || []) {
+        const isAssigned = (c.assignedToHumanAgents || []).some(a => String(a.humanAgentId) === String(humanAgentId));
+        if (isAssigned) {
+          assignedCount++;
+          const raw = String(c.number || '').trim();
+          const digits = raw.replace(/[^0-9]/g, '');
+          const plusPref = digits ? `+${digits}` : raw;
+          [raw, digits, plusPref].filter(Boolean).forEach(p => phoneSet.add(p));
+        }
+      }
+    }
+
+    // Count updates by this agent from MyDials (restrict to phones gathered and agent)
+    let updatedByAgent = 0;
+    try {
+      const MyDialsModel = require('../models/MyDials');
+      const phones = Array.from(phoneSet);
+      if (phones.length > 0) {
+        updatedByAgent = await MyDialsModel.countDocuments({ humanAgentId, phoneNumber: { $in: phones } });
+      }
+    } catch (_) {}
+
+    return res.json({ success: true, data: { humanAgentId, assignedCount, updatedByAgent } });
+  } catch (e) {
+    console.error('getAgentDispositionStats error:', e);
+    return res.status(500).json({ success: false, message: 'Failed to fetch stats' });
+  }
+};
 
 
 // List all client associations for the current human agent (by same email)

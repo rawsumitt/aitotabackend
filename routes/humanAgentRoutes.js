@@ -9,6 +9,7 @@ const {
 	getDialsDone
 } = require('../controllers/humanAgentController');
 const { listMyClientAssociations, switchAgentContext } = require('../controllers/humanAgentController');
+const { getAgentDispositionStats } = require('../controllers/humanAgentController');
 const {
 	getInboundReport,
 	getOutboundReport,
@@ -89,6 +90,7 @@ router.get('/associations', verifyHumanAgentToken, listMyClientAssociations);
 // ===================== MY DIAL (Human Agent) ===============================
 
 router.post('/dials', verifyClientOrHumanAgentToken, addDial);
+router.get('/agent-dispo-stats', verifyClientOrHumanAgentToken, getAgentDispositionStats);
 
 // Dials report
 router.get('/dials/report', verifyClientOrHumanAgentToken, getDialsReport);
