@@ -58,38 +58,21 @@ const listApprovedProfilesForCurrentUser = async (req, res) => {
     }
 
     // HumanAgents list policy
-    // - For client tokens: list ALL approved human agents under this client (regardless of email)
-    // - For non-client tokens: list approved human agents matching the same email (legacy behavior)
-    if (req.user?.userType === 'client') {
-      const clientScopedAgents = await HumanAgent.find({ clientId: req.user.id, isApproved: true }).populate('clientId');
-      for (const ha of clientScopedAgents) {
-        if (!ha.clientId) continue;
-        profiles.push({
-          role: 'humanAgent',
-          id: ha._id,
-          clientId: ha.clientId._id,
-          clientUserId: ha.clientId.userId,
-          clientName: ha.clientId.businessName || ha.clientId.name || ha.clientId.email,
-          email: ha.email,
-          isApproved: !!ha.isApproved,
-          isprofileCompleted: !!ha.isprofileCompleted
-        });
-      }
-    } else {
-      const humanAgents = await HumanAgent.find({ email, isApproved: true }).populate('clientId');
-      for (const ha of humanAgents) {
-        if (!ha.clientId) continue;
-        profiles.push({
-          role: 'humanAgent',
-          id: ha._id,
-          clientId: ha.clientId._id,
-          clientUserId: ha.clientId.userId,
-          clientName: ha.clientId.businessName || ha.clientId.name || ha.clientId.email,
-          email: ha.email,
-          isApproved: !!ha.isApproved,
-          isprofileCompleted: !!ha.isprofileCompleted
-        });
-      }
+    // - Always list ALL approved human agents matching the same email (regardless of client)
+    // - This allows users to see all their profiles across different clients
+    const humanAgents = await HumanAgent.find({ email, isApproved: true }).populate('clientId');
+    for (const ha of humanAgents) {
+      if (!ha.clientId) continue;
+      profiles.push({
+        role: 'humanAgent',
+        id: ha._id,
+        clientId: ha.clientId._id,
+        clientUserId: ha.clientId.userId,
+        clientName: ha.clientId.businessName || ha.clientId.name || ha.clientId.email,
+        email: ha.email,
+        isApproved: !!ha.isApproved,
+        isprofileCompleted: !!ha.isprofileCompleted
+      });
     }
 
     // Admin
