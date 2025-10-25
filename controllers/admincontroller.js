@@ -7,6 +7,7 @@ const Agent = require("../models/Agent");
 const { getobject } = require("../utils/s3");
 const DidNumber = require("../models/DidNumber");
 const Campaign = require("../models/Campaign");
+const Profile = require("../models/Profile");
 
 
 // Generate JWT Token for admin
@@ -400,6 +401,9 @@ const getClientToken = async (req, res) => {
     }
     console.log('Client found:', client.email);
 
+    // Get client profile
+    const profileId = await Profile.findOne({ clientId: client._id });
+    
     // Generate token for client with admin access flag
     const token = jwt.sign(
       { 
@@ -414,7 +418,11 @@ const getClientToken = async (req, res) => {
     );
 
     console.log('Generated client token for:', client.email);
-    res.json({ token });
+    res.json({ 
+      token, 
+      profileId: profileId ? profileId._id : null, 
+      userType: 'client' 
+    });
   } catch (error) {
     console.error('Error in getClientToken:', error);
     res.status(500).json({ message: 'Internal server error' });
