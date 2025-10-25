@@ -420,7 +420,7 @@ const getClientToken = async (req, res) => {
     console.log('Generated client token for:', client.email);
     res.json({ 
       token, 
-      profileId: profileId ? profileId._id : null, 
+      profileId: profileId ? profileId._id : client._id, 
       userType: 'client' 
     });
   } catch (error) {

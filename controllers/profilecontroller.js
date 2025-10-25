@@ -194,12 +194,47 @@ exports.getProfile = async (req, res) => {
       });
     }
 
-    const profile = await Profile.findById(req.params.profileId);
+    let profile = await Profile.findById(req.params.profileId);
     
+    // If profile not found, try treating the ID as clientId (fallback)
     if (!profile) {
+      try {
+        const client = await Client.findById(req.params.profileId);
+        if (client) {
+          // Return client data as fallback
+          return res.status(200).json({
+            statusCode: 200,
+            success: true,
+            message: 'Client data retrieved successfully (fallback)',
+            email: client.email,
+            role: 'client',
+            profile: {
+              _id: client._id,
+              clientId: client._id,
+              businessName: client.businessName,
+              email: client.email,
+              contactNumber: client.mobileNo,
+              contactName: client.name,
+              address: client.address,
+              gstNo: client.gstNo,
+              panNo: client.panNo,
+              role: 'client',
+              city: client.city,
+              pincode: client.pincode,
+              isProfileCompleted: client.isprofileCompleted || false,
+              createdAt: client.createdAt,
+              updatedAt: client.updatedAt
+            },
+          });
+        }
+      } catch (clientError) {
+        console.error('Error finding client as fallback:', clientError);
+      }
+      
+      // If neither profile nor client found
       return res.status(404).json({
         success: false,
-        message: 'Profile not found',
+        message: 'Profile or Client not found',
         statusCode: 404
       });
     }
