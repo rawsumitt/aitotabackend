@@ -144,12 +144,13 @@ const listApprovedProfilesForCurrentUser = async (req, res) => {
 // Authenticated: switch to selected profile and issue JWT
 const switchProfile = async (req, res) => {
   try {
+    // Capture previous token from Authorization header if present
+    const authHeaderRaw = req.headers.authorization || '';
+    const previousToken = authHeaderRaw.startsWith('Bearer ') ? authHeaderRaw.split(' ')[1] : null;
     // Enforce: humanAgent tokens issued by client cannot switch
     try {
-      const authHeader = req.headers.authorization || '';
-      const bearer = authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : null;
-      if (bearer) {
-        const decodedSwitch = jwt.verify(bearer, process.env.JWT_SECRET);
+      if (previousToken) {
+        const decodedSwitch = jwt.verify(previousToken, process.env.JWT_SECRET);
         if (decodedSwitch && decodedSwitch.userType === 'humanAgent') {
           if (decodedSwitch.aud === 'humanAgent' && decodedSwitch.allowSwitch !== true) {
             return res.status(403).json({ success: false, message: 'Switch not allowed for this agent token' });
@@ -216,7 +217,7 @@ const switchProfile = async (req, res) => {
       const token = jwt.sign({ id: client._id, email: client.email, userType: 'client', adminAccess, adminId }, process.env.JWT_SECRET, { expiresIn: '7d' });
       const profileId = await Profile.findOne({ clientId: client._id });
 
-      return res.json({ success: true, token, userType: 'client', id: client._id, email: client.email, name: client.name, clientUserId: client.userId, adminAccess, adminId, isApproved: !!client.isApproved, isprofileCompleted: !!client.isprofileCompleted, profileId: profileId ? profileId._id : null });
+      return res.json({ success: true, previousToken, token, userType: 'client', id: client._id, email: client.email, name: client.name, clientUserId: client.userId, adminAccess, adminId, isApproved: !!client.isApproved, isprofileCompleted: !!client.isprofileCompleted, profileId: profileId ? profileId._id : null });
     }
 
     if (role === 'humanAgent') {
@@ -232,7 +233,7 @@ const switchProfile = async (req, res) => {
         const humanAgentProfileId = await Profile.findOne({ humanAgentId: humanAgent._id });
         const clientProfileId = await Profile.findOne({ clientId: humanAgent.clientId._id });
 
-        return res.json({ success: true, token: jwtToken, userType: 'humanAgent', id: humanAgent._id, email: humanAgent.email, name: humanAgent.humanAgentName, isApproved: !!humanAgent.isApproved, isprofileCompleted: !!humanAgent.isprofileCompleted, clientId: humanAgent.clientId._id, clientUserId: humanAgent.clientId.userId, clientName: humanAgent.clientId.businessName || humanAgent.clientId.name || humanAgent.clientId.email, humanAgentProfileId: humanAgentProfileId ? humanAgentProfileId._id : null, clientProfileId: clientProfileId ? clientProfileId._id : null });
+        return res.json({ success: true, previousToken, token: jwtToken, userType: 'humanAgent', id: humanAgent._id, email: humanAgent.email, name: humanAgent.humanAgentName, isApproved: !!humanAgent.isApproved, isprofileCompleted: !!humanAgent.isprofileCompleted, clientId: humanAgent.clientId._id, clientUserId: humanAgent.clientId.userId, clientName: humanAgent.clientId.businessName || humanAgent.clientId.name || humanAgent.clientId.email, humanAgentProfileId: humanAgentProfileId ? humanAgentProfileId._id : null, clientProfileId: clientProfileId ? clientProfileId._id : null });
       }
 
       // If caller is self humanAgent: validate by email across associations
@@ -248,7 +249,7 @@ const switchProfile = async (req, res) => {
         const humanAgentProfileId = await Profile.findOne({ humanAgentId: humanAgent._id });
         const clientProfileId = await Profile.findOne({ clientId: humanAgent.clientId._id });
 
-        return res.json({ success: true, token: jwtToken, userType: 'humanAgent', id: humanAgent._id, email: humanAgent.email, name: humanAgent.humanAgentName, isApproved: !!humanAgent.isApproved, isprofileCompleted: !!humanAgent.isprofileCompleted, clientId: humanAgent.clientId._id, clientUserId: humanAgent.clientId.userId, clientName: humanAgent.clientId.businessName || humanAgent.clientId.name || humanAgent.clientId.email, humanAgentProfileId: humanAgentProfileId ? humanAgentProfileId._id : null, clientProfileId: clientProfileId ? clientProfileId._id : null });
+        return res.json({ success: true, previousToken, token: jwtToken, userType: 'humanAgent', id: humanAgent._id, email: humanAgent.email, name: humanAgent.humanAgentName, isApproved: !!humanAgent.isApproved, isprofileCompleted: !!humanAgent.isprofileCompleted, clientId: humanAgent.clientId._id, clientUserId: humanAgent.clientId.userId, clientName: humanAgent.clientId.businessName || humanAgent.clientId.name || humanAgent.clientId.email, humanAgentProfileId: humanAgentProfileId ? humanAgentProfileId._id : null, clientProfileId: clientProfileId ? clientProfileId._id : null });
       }
 
       return res.status(403).json({ success: false, message: 'Unsupported token for human agent switch' });
@@ -258,7 +259,7 @@ const switchProfile = async (req, res) => {
       const admin = await Admin.findOne({ _id: id, email });
       if (!admin) return res.status(404).json({ success: false, message: 'Admin not found for this email' });
       const token = jwt.sign({ id: admin._id, userType: 'admin', email: admin.email }, process.env.JWT_SECRET, { expiresIn: '7d' });
-      return res.json({ success: true, token, userType: 'admin', id: admin._id, email: admin.email, name: admin.name });
+      return res.json({ success: true, previousToken, token, userType: 'admin', id: admin._id, email: admin.email, name: admin.name });
     }
 
     return res.status(400).json({ success: false, message: 'Invalid role' });
