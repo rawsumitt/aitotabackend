@@ -1,6 +1,7 @@
 const Profile = require('../models/Profile');
 const Client = require('../models/Client');
 const HumanAgent = require('../models/HumanAgent');
+const { getobject } = require('../utils/s3');
 
 // Helper to check if all required fields are filled
 function checkProfileCompleted(profile) {
@@ -201,6 +202,15 @@ exports.getProfile = async (req, res) => {
       try {
         const client = await Client.findById(req.params.profileId);
         if (client) {
+          // Generate client logo URL if possible
+          // Always generate a fresh URL on each request
+          let logoUrl = null;
+          try {
+            if (client.businessLogoKey) {
+              logoUrl = await getobject(client.businessLogoKey);
+            }
+          } catch (_) {}
+
           // Return client data as fallback
           return res.status(200).json({
             statusCode: 200,
@@ -216,6 +226,8 @@ exports.getProfile = async (req, res) => {
               contactNumber: client.mobileNo,
               contactName: client.name,
               address: client.address,
+              clientLogo: logoUrl || null,
+              businessLogoKey: client.businessLogoKey || null,
               gstNo: client.gstNo,
               panNo: client.panNo,
               role: 'client',
@@ -242,16 +254,27 @@ exports.getProfile = async (req, res) => {
     // Get human email and role if profile has humanAgentId
     let clientEmail = null;
     let role = null;
+    let businessLogoKey = null;
+    let clientLogo = null;
     if (profile.humanAgentId) {
       const humanAgent = await HumanAgent.findById(profile.humanAgentId).select('email role');
       clientEmail = humanAgent ? humanAgent.email : null;
       role = humanAgent ? humanAgent.role : null;
     } else if (profile.clientId) {
       try {
-        const client = await Client.findById(profile.clientId).select('email');
+        const client = await Client.findById(profile.clientId).select('email businessLogoKey');
         if (client) {
           clientEmail = client.email;
           role = 'client'; // Set role as 'client' for client profiles
+          businessLogoKey = client.businessLogoKey || null;
+          // Always generate a fresh URL on each request
+          let logoUrl = null;
+          try {
+            if (client.businessLogoKey) {
+              logoUrl = await getobject(client.businessLogoKey);
+            }
+          } catch (_) {}
+          clientLogo = logoUrl;
         } else {
           clientEmail = null;
           role = null;
@@ -277,6 +300,8 @@ exports.getProfile = async (req, res) => {
       message: 'Profile retrieved successfully',
       email: clientEmail,
       role: role,
+      clientLogo: clientLogo || null,
+      businessLogoKey: businessLogoKey || null,
       profile,
       statusCode: 200
     });

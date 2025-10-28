@@ -51,7 +51,7 @@ exports.getDialsReport = async (req, res) => {
 	try {
 		const humanAgentId = req.user.id;
 		const { filter, startDate, endDate } = req.query;
-		const allowedFilters = ['today', 'yesterday', 'last7days'];
+		const allowedFilters = ['all', 'today', 'yesterday', 'last7days'];
 		if (filter && !allowedFilters.includes(filter) && (!startDate || !endDate)) {
 			return res.status(400).json({ success: false, error: 'Invalid filter parameter', message: `Filter must be one of: ${allowedFilters.join(', ')} or provide both startDate and endDate`, allowedFilters });
 		}
@@ -95,7 +95,7 @@ exports.getDialsLeads = async (req, res) => {
 	try {
 		const humanAgentId = req.user.id;
 		const { filter, startDate, endDate } = req.query;
-		const allowedFilters = ['today', 'yesterday', 'last7days'];
+		const allowedFilters = ['all', 'today', 'yesterday', 'last7days'];
 		if (filter && !allowedFilters.includes(filter) && (!startDate || !endDate)) {
 			return res.status(400).json({ success: false, error: 'Invalid filter parameter', message: `Filter must be one of: ${allowedFilters.join(', ')} or provide both startDate and endDate`, allowedFilters });
 		}
@@ -209,7 +209,7 @@ exports.getDialsDone = async (req, res) => {
 	try {
 		const humanAgentId = req.user.id;
 		const { filter, startDate, endDate } = req.query;
-		const allowedFilters = ['today', 'yesterday', 'last7days'];
+		const allowedFilters = ['all', 'today', 'yesterday', 'last7days'];
 		if (filter && !allowedFilters.includes(filter) && !startDate && !endDate) {
 			return res.status(400).json({ error: 'Invalid filter parameter' });
 		}
@@ -288,7 +288,10 @@ async function getClientIdCandidates(user) {
 // Build date filter helper identical to client routes behavior
 function buildDateFilter(filter, startDate, endDate) {
 	let dateFilter = {};
-	if (filter === 'today') {
+	if (filter === 'all') {
+		// No date filtering - return empty object to show all records
+		dateFilter = {};
+	} else if (filter === 'today') {
 		const today = new Date();
 		const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
 		const endOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59, 999);
@@ -313,7 +316,7 @@ function buildDateFilter(filter, startDate, endDate) {
 }
 
 function validateFilter(filter, startDate, endDate) {
-	const allowedFilters = ['today', 'yesterday', 'last7days'];
+	const allowedFilters = ['all', 'today', 'yesterday', 'last7days'];
 	if (filter && !allowedFilters.includes(filter) && (!startDate || !endDate)) {
 		return {
 			success: false,
