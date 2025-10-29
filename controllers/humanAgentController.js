@@ -656,16 +656,17 @@ exports.listGroups = async (req, res) => {
         const candidates = await getClientIdCandidates(req.user);
         const ownerType = req.user.userType === 'humanAgent' ? 'humanAgent' : 'client';
         const ownerId = new (require('mongoose')).Types.ObjectId(String(req.user.id));
+        const ownerParam = String(req.query.owner || '').toLowerCase();
+        const orConditions = ownerParam === 'assign'
+            ? [ { assignedHumanAgents: ownerId } ]
+            : [ { ownerType, ownerId }, { assignedHumanAgents: ownerId } ];
         
         // Show groups owned by the current actor OR groups assigned to the current human agent
         const groups = await Group.aggregate([
             { 
                 $match: { 
                     clientId: { $in: candidates },
-                    $or: [
-                        { ownerType, ownerId }, // Groups owned by current actor
-                        { assignedHumanAgents: ownerId } // Groups assigned to current human agent
-                    ]
+                    $or: orConditions
                 } 
             },
 			{ $sort: { createdAt: -1 } },
