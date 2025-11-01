@@ -1,6 +1,6 @@
 const express = require("express");
 const router = express.Router();
-const { loginAdmin, registerAdmin, getClients, getClientById, deleteclient, getClientToken, approveClient, getAllAgents, toggleAgentStatus, copyAgent, deleteAgent,updateClient, updateAgent, createSystemPrompt, getSystemPrompts, setDefaultSystemPrompt, deleteSystemPrompt, updateSystemPrompt, assignCzentrixToAgent } = require("../controllers/admincontroller");
+const { loginAdmin, registerAdmin, getClients, getClientById, deleteclient, getClientToken, postClientToken, approveClient, getAllAgents, toggleAgentStatus, copyAgent, deleteAgent,updateClient, updateAgent, createSystemPrompt, getSystemPrompts, setDefaultSystemPrompt, deleteSystemPrompt, updateSystemPrompt, assignCzentrixToAgent } = require("../controllers/admincontroller");
 const adminCtrl = require("../controllers/admincontroller");
 const { verifyAdminToken } = require("../middlewares/authmiddleware");
 const planController = require("../controllers/planController");
@@ -15,7 +15,10 @@ router.post("/register", registerAdmin);
 router.get("/getclients", verifyAdminToken, getClients);
 router.get("/getclient/:id", verifyAdminToken, getClientById);
 router.delete("/deleteclient/:id", verifyAdminToken, deleteclient);
+// Original GET API with clientId in params
 router.get("/get-client-token/:clientId", verifyAdminToken, getClientToken);
+// New POST API with tokens object support (clientId in body)
+router.post("/get-client-token/:clientId", verifyAdminToken, postClientToken);
 router.post("/approve-client/:clientId", verifyAdminToken, approveClient);
 router.get("/all-agents", verifyAdminToken, getAllAgents);
 router.put("/toggle-agent-status/:agentId", verifyAdminToken, toggleAgentStatus);

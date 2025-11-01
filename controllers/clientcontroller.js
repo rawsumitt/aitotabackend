@@ -138,17 +138,15 @@ const listApprovedProfilesForCurrentUser = async (req, res) => {
   } catch (error) {
     console.error('listApprovedProfilesForCurrentUser error:', error);
     return res.status(500).json({ success: false, message: 'Failed to list profiles' });
-  }
+  } 
 };
 
-// Authenticated: switch to selected profile and issue JWT
 const switchProfile = async (req, res) => {
   try {
-    // Capture previous token from Authorization header if present
-    const authHeaderRaw = req.headers.authorization || '';
-    const previousToken = authHeaderRaw.startsWith('Bearer ') ? authHeaderRaw.split(' ')[1] : null;
     // Enforce: humanAgent tokens issued by client cannot switch
     try {
+      const authHeaderRaw = req.headers.authorization || '';
+      const previousToken = authHeaderRaw.startsWith('Bearer ') ? authHeaderRaw.split(' ')[1] : null;
       if (previousToken) {
         const decodedSwitch = jwt.verify(previousToken, process.env.JWT_SECRET);
         if (decodedSwitch && decodedSwitch.userType === 'humanAgent') {
@@ -157,7 +155,17 @@ const switchProfile = async (req, res) => {
           }
         }
       }
-    } catch (_) {}
+    } catch (_) {
+      // ignore decode failures
+    }
+
+    // Initialize or get tokens object from request body
+    let tokens = req.body?.tokens || {
+      adminToken: null,
+      clientToken: null,
+      humanAgentToken: null
+    };
+
     // Resolve email like above
     let email = req.user?.email;
     if (!email) {
@@ -180,16 +188,15 @@ const switchProfile = async (req, res) => {
     // Accept full profile object or { role, id } or raw model objects
     let role = req.body?.role;
     let id = req.body?.id || req.body?._id;
-
     // If role missing, infer from body shape
     if (!role) {
       const b = req.body || {};
-      // HumanAgent-like shapes
+      // HumanAgent-like
       if (b.humanAgentName || b.agentIds || b.role === 'humanAgent' || b.clientId) {
         role = 'humanAgent';
         id = id || b.humanAgentId || b.id || b._id;
       }
-      // Client-like shapes
+      // Client-like
       else if (b.clientUserId || b.businessName || b.clientType || b.gstNo || b.panNo) {
         role = 'client';
         id = id || b.clientId || b.id || b._id;
@@ -200,66 +207,108 @@ const switchProfile = async (req, res) => {
         id = id || b.id || b._id;
       }
     }
-
     if (!role || !id) {
       return res.status(400).json({ success: false, message: 'role and id (or a profile object) are required' });
     }
 
+    // CLIENT SWITCH
     if (role === 'client') {
       const client = await Client.findOne({ _id: id, email });
       if (!client) return res.status(404).json({ success: false, message: 'Client not found for this email' });
       if (!client.isApproved) return res.status(401).json({ success: false, message: 'Client not approved' });
-
       const sameEmailAdmin = await Admin.findOne({ email });
       const adminAccess = !!sameEmailAdmin;
       const adminId = sameEmailAdmin ? String(sameEmailAdmin._id) : undefined;
-
       const token = jwt.sign({ id: client._id, email: client.email, userType: 'client', adminAccess, adminId }, process.env.JWT_SECRET, { expiresIn: '7d' });
       const profileId = await Profile.findOne({ clientId: client._id });
 
-      return res.json({ success: true, previousToken, token, userType: 'client', id: client._id, email: client.email, name: client.name, clientUserId: client.userId, adminAccess, adminId, isApproved: !!client.isApproved, isprofileCompleted: !!client.isprofileCompleted, profileId: profileId ? profileId._id : null });
+      // Update tokens object - replace clientToken with new token
+      tokens.clientToken = token;
+
+      return res.json({
+        success: true,
+        token,
+        tokens,
+        userType: 'client',
+        id: client._id,
+        email: client.email,
+        name: client.name,
+        clientUserId: client.userId,
+        adminAccess,
+        adminId,
+        isApproved: !!client.isApproved,
+        isprofileCompleted: !!client.isprofileCompleted,
+        profileId: profileId ? profileId._id : null
+      });
     }
 
+    // HUMAN AGENT SWITCH
     if (role === 'humanAgent') {
-      // If caller is client: validate by clientId context
+      // If called as client, validate by client context
+      let humanAgent;
       if (req.user?.userType === 'client') {
         const clientIdCtx = req.user.id;
-        const humanAgent = await HumanAgent.findOne({ _id: id, clientId: clientIdCtx }).populate('clientId');
+        humanAgent = await HumanAgent.findOne({ _id: id, clientId: clientIdCtx }).populate('clientId');
         if (!humanAgent) return res.status(404).json({ success: false, message: 'Human agent not found under this client' });
-        if (!humanAgent.isApproved) return res.status(401).json({ success: false, message: 'Human agent not approved' });
-        if (!humanAgent.clientId) return res.status(400).json({ success: false, message: 'Associated client not found' });
-
-        const jwtToken = jwt.sign({ id: humanAgent._id, userType: 'humanAgent', clientId: humanAgent.clientId._id, email: humanAgent.email, aud: 'humanAgent', allowSwitch: false, impersonatedBy: { type: 'client', id: String(clientIdCtx) } }, process.env.JWT_SECRET, { expiresIn: '1h' });``
-        const humanAgentProfileId = await Profile.findOne({ humanAgentId: humanAgent._id });
-        const clientProfileId = await Profile.findOne({ clientId: humanAgent.clientId._id });
-
-        return res.json({ success: true, previousToken, token: jwtToken, userType: 'humanAgent', id: humanAgent._id, email: humanAgent.email, name: humanAgent.humanAgentName, isApproved: !!humanAgent.isApproved, isprofileCompleted: !!humanAgent.isprofileCompleted, clientId: humanAgent.clientId._id, clientUserId: humanAgent.clientId.userId, clientName: humanAgent.clientId.businessName || humanAgent.clientId.name || humanAgent.clientId.email, humanAgentProfileId: humanAgentProfileId ? humanAgentProfileId._id : null, clientProfileId: clientProfileId ? clientProfileId._id : null });
-      }
-
-      // If caller is self humanAgent: validate by email across associations
-      if (req.user?.userType === 'humanAgent') {
-        const currentAgent = await HumanAgent.findById(req.user.id);
-        if (!currentAgent) return res.status(401).json({ success: false, message: 'Current agent not found' });
-        const humanAgent = await HumanAgent.findOne({ _id: id, email: currentAgent.email }).populate('clientId');
+      } else {
+        humanAgent = await HumanAgent.findOne({ _id: id, email }).populate('clientId');
         if (!humanAgent) return res.status(404).json({ success: false, message: 'Human agent not found for this email' });
-        if (!humanAgent.isApproved) return res.status(401).json({ success: false, message: 'Human agent not approved' });
-        if (!humanAgent.clientId) return res.status(400).json({ success: false, message: 'Associated client not found' });
-
-        const jwtToken = jwt.sign({ id: humanAgent._id, userType: 'humanAgent', clientId: humanAgent.clientId._id, email: humanAgent.email, aud: 'humanAgent', allowSwitch: true }, process.env.JWT_SECRET, { expiresIn: '7d' });
-        const humanAgentProfileId = await Profile.findOne({ humanAgentId: humanAgent._id });
-        const clientProfileId = await Profile.findOne({ clientId: humanAgent.clientId._id });
-
-        return res.json({ success: true, previousToken, token: jwtToken, userType: 'humanAgent', id: humanAgent._id, email: humanAgent.email, name: humanAgent.humanAgentName, isApproved: !!humanAgent.isApproved, isprofileCompleted: !!humanAgent.isprofileCompleted, clientId: humanAgent.clientId._id, clientUserId: humanAgent.clientId.userId, clientName: humanAgent.clientId.businessName || humanAgent.clientId.name || humanAgent.clientId.email, humanAgentProfileId: humanAgentProfileId ? humanAgentProfileId._id : null, clientProfileId: clientProfileId ? clientProfileId._id : null });
       }
+      if (!humanAgent.isApproved) return res.status(401).json({ success: false, message: 'Human agent not approved' });
+      if (!humanAgent.clientId) return res.status(400).json({ success: false, message: 'Associated client not found' });
 
-      return res.status(403).json({ success: false, message: 'Unsupported token for human agent switch' });
+      const jwtToken = jwt.sign({
+        id: humanAgent._id,
+        userType: 'humanAgent',
+        clientId: humanAgent.clientId._id,
+        email: humanAgent.email,
+        aud: 'humanAgent',
+        allowSwitch: true
+      }, process.env.JWT_SECRET, { expiresIn: '7d' });
+
+      const humanAgentProfileId = await Profile.findOne({ humanAgentId: humanAgent._id });
+      const clientProfileId = await Profile.findOne({ clientId: humanAgent.clientId._id });
+
+      // Update tokens object - replace humanAgentToken with new token
+      tokens.humanAgentToken = jwtToken;
+
+      return res.json({
+        success: true,
+        token: jwtToken,
+        tokens,
+        userType: 'humanAgent',
+        id: humanAgent._id,
+        role: humanAgent.role,
+        email: humanAgent.email,
+        name: humanAgent.humanAgentName,
+        isApproved: !!humanAgent.isApproved,
+        isprofileCompleted: !!humanAgent.isprofileCompleted,
+        clientId: humanAgent.clientId._id,
+        clientUserId: humanAgent.clientId.userId,
+        clientName: humanAgent.clientId.businessName || humanAgent.clientId.name || humanAgent.clientId.email,
+        humanAgentProfileId: humanAgentProfileId ? humanAgentProfileId._id : null,
+        clientProfileId: clientProfileId ? clientProfileId._id : null
+      });
     }
 
+    // ADMIN SWITCH
     if (role === 'admin') {
       const admin = await Admin.findOne({ _id: id, email });
       if (!admin) return res.status(404).json({ success: false, message: 'Admin not found for this email' });
       const token = jwt.sign({ id: admin._id, userType: 'admin', email: admin.email }, process.env.JWT_SECRET, { expiresIn: '7d' });
-      return res.json({ success: true, previousToken, token, userType: 'admin', id: admin._id, email: admin.email, name: admin.name });
+
+      // Update tokens object - replace adminToken with new token
+      tokens.adminToken = token;
+
+      return res.json({
+        success: true,
+        token,
+        tokens,
+        userType: 'admin',
+        id: admin._id,
+        email: admin.email,
+        name: admin.name
+      });
     }
 
     return res.status(400).json({ success: false, message: 'Invalid role' });
@@ -355,10 +404,20 @@ const googleListApprovedProfiles = async (req, res) => {
       const token = jwt.sign({ id: client._id, email: client.email, userType: 'client' }, process.env.JWT_SECRET, { expiresIn: '7d' });
       const profileId = await Profile.findOne({ clientId: client._id });
 
+      // Initialize tokens object for client
+      const tokens = {
+        adminToken: null,
+        clientToken: token,
+        humanAgentToken: null
+      };
+
       return res.json({
         success: true,
         autoOnboard: true,
         token,
+        rootUserToken: token,
+        rootUserType: 'client',
+        tokens,
         userType: 'client',
         id: client._id,
         email: client.email,
@@ -370,7 +429,6 @@ const googleListApprovedProfiles = async (req, res) => {
         profiles: []
       });
     }
-
     // If exactly one profile exists, directly issue a token for that role to skip selection
     if (profiles.length === 1) {
       const only = profiles[0];
@@ -382,7 +440,31 @@ const googleListApprovedProfiles = async (req, res) => {
           const adminId = sameEmailAdmin ? String(sameEmailAdmin._id) : undefined;
           const token = jwt.sign({ id: client._id, email: client.email, userType: 'client', adminAccess, adminId }, process.env.JWT_SECRET, { expiresIn: '7d' });
           const profileId = await Profile.findOne({ clientId: client._id });
-          return res.json({ success: true, singleProfile: true, token, userType: 'client', id: client._id, email: client.email, name: client.name, clientUserId: client.userId, adminAccess, adminId, isApproved: !!client.isApproved, isprofileCompleted: !!client.isprofileCompleted, profileId: profileId ? profileId._id : null });
+
+          // Initialize tokens object for client
+          const tokens = {
+            adminToken: null,
+            clientToken: token,
+            humanAgentToken: null
+          };
+
+                return res.json({
+                      success: true,
+                        singleProfile: true,
+                        token,
+                        rootUserToken: token,
+                        rootUserType: 'client',
+                        tokens,
+                        userType: 'client',
+                        id: client._id,
+                        email: client.email,
+                        name: client.name,
+                        clientUserId: client.userId,
+                        adminAccess, adminId,
+                       isApproved: !!client.isApproved,
+                        isprofileCompleted: !!client.isprofileCompleted,
+                       profileId: profileId ? profileId._id : null
+                      });
         }
       } else if (only.userType === 'humanAgent') {
         const humanAgent = await HumanAgent.findOne({ _id: only.id, email }).populate('clientId');
@@ -390,13 +472,59 @@ const googleListApprovedProfiles = async (req, res) => {
           const jwtToken = jwt.sign({ id: humanAgent._id, userType: 'humanAgent', clientId: humanAgent.clientId._id, email: humanAgent.email, aud: 'humanAgent', allowSwitch: true }, process.env.JWT_SECRET, { expiresIn: '7d' });
           const humanAgentProfileId = await Profile.findOne({ humanAgentId: humanAgent._id });
           const clientProfileId = await Profile.findOne({ clientId: humanAgent.clientId._id });
-          return res.json({ success: true, singleProfile: true, token: jwtToken, userType: 'humanAgent', id: humanAgent._id, email: humanAgent.email, name: humanAgent.humanAgentName, role: humanAgent.role, isApproved: !!humanAgent.isApproved, isprofileCompleted: !!humanAgent.isprofileCompleted, clientId: humanAgent.clientId._id, clientUserId: humanAgent.clientId.userId, clientName: humanAgent.clientId.businessName || humanAgent.clientId.name || humanAgent.clientId.email, humanAgentProfileId: humanAgentProfileId ? humanAgentProfileId._id : null, clientProfileId: clientProfileId ? clientProfileId._id : null });
+
+          // Initialize tokens object for humanAgent
+          const tokens = {
+            adminToken: null,
+            clientToken: null,
+            humanAgentToken: jwtToken
+          };
+
+                   return res.json({
+                        success: true,
+                        singleProfile: true,
+                       token: jwtToken,
+                      rootUserToken: jwtToken,
+                        rootUserType: 'humanAgent',
+                        tokens,
+                        userType: 'humanAgent',
+                       id: humanAgent._id,
+                        email: humanAgent.email,
+                        name: humanAgent.humanAgentName,
+                        role: humanAgent.role,
+                        isApproved: !!humanAgent.isApproved,
+                        isprofileCompleted: !!humanAgent.isprofileCompleted,
+                        clientId: humanAgent.clientId._id,
+                        clientUserId: humanAgent.clientId.userId,
+                       clientName: humanAgent.clientId.businessName || humanAgent.clientId.name || humanAgent.clientId.email,
+                   humanAgentProfileId: humanAgentProfileId ? humanAgentProfileId._id : null,
+                     clientProfileId: clientProfileId ? clientProfileId._id : null
+                      });
         }
       } else if (only.userType === 'admin') {
         const admin = await Admin.findOne({ _id: only.id, email });
         if (admin) {
           const token = jwt.sign({ id: admin._id, userType: 'admin', email: admin.email }, process.env.JWT_SECRET, { expiresIn: '7d' });
-          return res.json({ success: true, singleProfile: true, token, userType: 'admin', id: admin._id, email: admin.email, name: admin.name });
+
+          // Initialize tokens object for admin
+          const tokens = {
+            adminToken: token,
+            clientToken: null,
+            humanAgentToken: null
+          };
+
+                    return res.json({
+                        success: true,
+                        singleProfile: true,
+                        token,
+                        rootUserToken: token,
+                        rootUserType: 'admin',
+                        tokens,
+                        userType: 'admin',
+                        id: admin._id,
+                        email: admin.email,
+                        name: admin.name
+                      });
         }
       }
       // Fallback to listing if validation failed
@@ -420,6 +548,13 @@ const googleSelectProfile = async (req, res) => {
     // Accept either { role, id } OR full profile object previously returned
     let userType = req.body?.userType;
     let id = req.body?.id;
+    // Initialize or get tokens object from request body
+    let tokens = req.body?.tokens || {
+      adminToken: null,
+      clientToken: null,
+      humanAgentToken: null
+    };
+
     const bodyHasProfileShape = req.body && typeof req.body === 'object' && (req.body.role && req.body.id && req.body.email);
     if (bodyHasProfileShape) {
       userType = req.body.userType;
@@ -453,9 +588,13 @@ const googleSelectProfile = async (req, res) => {
       }, process.env.JWT_SECRET, { expiresIn: '7d' });
       const profileId = await Profile.findOne({ clientId: client._id });
 
+      // Update tokens object - replace clientToken with new token
+      tokens.clientToken = token;
+
       return res.json({
         success: true,
         token,
+        tokens,
         userType: 'client',
         id: client._id,
         email: client.email,
@@ -481,14 +620,25 @@ const googleSelectProfile = async (req, res) => {
         return res.status(400).json({ success: false, message: 'Associated client not found' });
       }
 
-      // This is a “self-selected” agent token from Google selection: allow further switches (agent-only)
-      const jwtToken = jwt.sign({ id: humanAgent._id, userType: 'humanAgent', clientId: humanAgent.clientId._id, email: humanAgent.email, aud: 'humanAgent', allowSwitch: true }, process.env.JWT_SECRET, { expiresIn: '7d' });
+      // This is a "self-selected" agent token from Google selection: allow further switches (agent-only)
+      const jwtToken = jwt.sign({
+        id: humanAgent._id,
+        userType: 'humanAgent',
+        clientId: humanAgent.clientId._id,
+        email: humanAgent.email,
+        aud: 'humanAgent',
+        allowSwitch: true
+      }, process.env.JWT_SECRET, { expiresIn: '7d' });
       const humanAgentProfileId = await Profile.findOne({ humanAgentId: humanAgent._id });
       const clientProfileId = await Profile.findOne({ clientId: humanAgent.clientId._id });
+
+      // Update tokens object - replace humanAgentToken with new token
+      tokens.humanAgentToken = jwtToken;
 
       return res.json({
         success: true,
         token: jwtToken,
+        tokens,
         userType: 'humanAgent',
         id: humanAgent._id,
         role: humanAgent.role,
@@ -512,9 +662,14 @@ const googleSelectProfile = async (req, res) => {
 
       // Include email in admin token
       const token = jwt.sign({ id: admin._id, userType: 'admin', email: admin.email }, process.env.JWT_SECRET, { expiresIn: '7d' });
+
+      // Update tokens object - replace adminToken with new token
+      tokens.adminToken = token;
+
       return res.json({
         success: true,
         token,
+        tokens,
         userType: 'admin',
         id: admin._id,
         email: admin.email,
