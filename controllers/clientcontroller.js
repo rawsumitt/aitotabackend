@@ -1132,7 +1132,7 @@ const getHumanAgentToken = async (req, res) => {
       aud: 'humanAgent',
       allowSwitch: false,
       impersonatedBy: { type: req.user?.userType || 'client', id: String(req.user?.id || clientId) }
-    }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
     // Optionally include profiles
     const humanAgentProfileId = await Profile.findOne({ humanAgentId: humanAgent._id });

@@ -414,7 +414,7 @@ const getClientToken = async (req, res) => {
         adminId: adminId // Store admin ID for tracking
       },
       process.env.JWT_SECRET,
-      { expiresIn: '1d' }
+      { expiresIn: '7d' }
     );
 
     console.log('Generated client token for:', client.email);
@@ -486,7 +486,7 @@ const postClientToken = async (req, res) => {
         adminId: adminId // Store admin ID for tracking
       },
       process.env.JWT_SECRET,
-      { expiresIn: '1d' }
+      { expiresIn: '7d' }
     );
 
     // Update tokens object - replace clientToken with new token

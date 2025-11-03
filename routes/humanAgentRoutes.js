@@ -1,15 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const MyDials = require('../models/MyDials');
-const { verifyClientOrHumanAgentToken, verifyHumanAgentToken } = require('../middlewares/authmiddleware');
-const {
-	addDial,
-	getDialsReport,
-	getDialsLeads,
-	getDialsDone
-} = require('../controllers/humanAgentController');
-const { listMyClientAssociations, switchAgentContext } = require('../controllers/humanAgentController');
-const { getAgentDispositionStats } = require('../controllers/humanAgentController');
+const { verifyClientOrHumanAgentToken } = require('../middlewares/authmiddleware');
 const {
 	getInboundReport,
 	getOutboundReport,
@@ -22,17 +14,15 @@ const {
 	updateGroup,
 	getGroup,
 	deleteGroup,
-  getGroupsContacts,
-  addContactToGroup,
-  bulkAddContactsToGroup,
-  bulkDeleteContactsFromGroup,
-  deleteContactFromGroup,
+	getGroupsContacts,
+	addContactToGroup,
+	bulkAddContactsToGroup,
+	bulkDeleteContactsFromGroup,
+	deleteContactFromGroup,
 	createCampaign,
 	attachGroupsToCampaign,
 	startCampaign,
-	singleCall,
-	getAssignedCampaigns,
-	getAssignedContacts,
+	singleCall
 } = require('../controllers/humanAgentController');
 
 // Import helper function
@@ -77,20 +67,17 @@ router.post('/groups/:groupId/assign', verifyClientOrHumanAgentToken, require('.
 // Get human agents for assignment - accessible by clients
 router.get('/human-agents', verifyClientOrHumanAgentToken, require('../controllers/humanAgentController').getHumanAgentsForAssignment);
 
-// Assigned campaigns and contacts for human agents
-router.get('/assigned-campaigns', verifyClientOrHumanAgentToken, getAssignedCampaigns);
-router.get('/assigned-contacts', verifyClientOrHumanAgentToken, getAssignedContacts);
-
-// Agent → Agent switch (self-only, allowSwitch must be true)
-router.post('/switch', verifyHumanAgentToken, switchAgentContext);
-
-// Agent: list all client associations for this email
-router.get('/associations', verifyHumanAgentToken, listMyClientAssociations);
-
 // ===================== MY DIAL (Human Agent) ===============================
 
+// Add dial
+const {
+	addDial,
+	getDialsReport,
+	getDialsLeads,
+	getDialsDone
+} = require('../controllers/humanAgentController');
+
 router.post('/dials', verifyClientOrHumanAgentToken, addDial);
-router.get('/agent-dispo-stats', verifyClientOrHumanAgentToken, getAgentDispositionStats);
 
 // Dials report
 router.get('/dials/report', verifyClientOrHumanAgentToken, getDialsReport);

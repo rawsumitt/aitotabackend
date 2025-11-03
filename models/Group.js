@@ -23,6 +23,23 @@ const contactSchema = new mongoose.Schema({
     enum: ['default', 'interested', 'maybe', 'not interested'],
     default: 'default'
   },
+  // Assigned human agents - tracks which human agents this contact is assigned to
+  assignedToHumanAgents: [{
+    humanAgentId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'HumanAgent',
+      required: true
+    },
+    assignedAt: {
+      type: Date,
+      default: Date.now
+    },
+    assignedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Client',
+      required: false
+    }
+  }],
   createdAt: {
     type: Date,
     default: Date.now
@@ -72,10 +89,6 @@ const groupSchema = new mongoose.Schema({
     ref: 'HumanAgent',
     index: true
   }],
-  category: {
-    type: String,
-    trim: true
-  },
   createdAt: {
     type: Date,
     default: Date.now

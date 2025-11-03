@@ -1,46 +1,24 @@
 // ===================== MY DIALS (Human Agent) ===============================
-const jwt = require('jsonwebtoken');
-const HumanAgent = require('../models/HumanAgent');
-const Profile = require('../models/Profile');
 const MyDials = require('../models/MyDials');
 
 exports.addDial = async (req, res) => {
 	try {
 		const humanAgentId = req.user.id;
-    const { category, phoneNumber, leadStatus, contactName, date, other, duration } = req.body;
-    // Only category and phoneNumber are mandatory; contactName is optional
-    if (!category || !phoneNumber) {
-      return res.status(400).json({ success: false, message: "Missing required fields. Required: category and phoneNumber" });
-    }
-    // Upsert: ensure only one record per (humanAgentId + phoneNumber). Subsequent saves update same record.
-    const existing = await MyDials.findOne({ humanAgentId, phoneNumber });
-    let action = 'created';
-    let dial;
-    if (existing) {
-      existing.category = category;
-      existing.leadStatus = leadStatus;
-      if (typeof contactName !== 'undefined') existing.contactName = contactName;
-      if (date) existing.date = date;
-      if (typeof duration !== 'undefined') existing.duration = duration || 0;
-      if (other !== undefined) existing.other = other;
-      await existing.save();
-      dial = existing;
-      action = 'updated';
-    } else {
-      dial = await MyDials.create({
-        humanAgentId,
-        clientId: req.user.clientId,
-        category,
-        leadStatus,
-        phoneNumber,
-        contactName: contactName || '',
-        date,
-        other,
-        duration: duration || 0
-      });
-      action = 'created';
-    }
-    res.status(existing ? 200 : 201).json({ success: true, data: dial, action });
+		const { category, phoneNumber, leadStatus, contactName, date, other } = req.body;
+		if (!category || !phoneNumber || !contactName) {
+			return res.status(400).json({ success: false, message: "Missing required fields. Required: category, phoneNumber, contactName" });
+		}
+		const dial = await MyDials.create({
+			humanAgentId,
+			clientId: req.user.clientId,
+			category,
+			leadStatus,
+			phoneNumber,
+			contactName,
+			date,
+			other
+		});
+		res.status(201).json({ success: true, data: dial });
 	} catch (error) {
 		console.log(error);
 		return res.status(400).json({ success: false, message: "Failed to add dials" });
@@ -51,7 +29,7 @@ exports.getDialsReport = async (req, res) => {
 	try {
 		const humanAgentId = req.user.id;
 		const { filter, startDate, endDate } = req.query;
-		const allowedFilters = ['all', 'today', 'yesterday', 'last7days'];
+		const allowedFilters = ['today', 'yesterday', 'last7days'];
 		if (filter && !allowedFilters.includes(filter) && (!startDate || !endDate)) {
 			return res.status(400).json({ success: false, error: 'Invalid filter parameter', message: `Filter must be one of: ${allowedFilters.join(', ')} or provide both startDate and endDate`, allowedFilters });
 		}
@@ -95,7 +73,7 @@ exports.getDialsLeads = async (req, res) => {
 	try {
 		const humanAgentId = req.user.id;
 		const { filter, startDate, endDate } = req.query;
-		const allowedFilters = ['all', 'today', 'yesterday', 'last7days'];
+		const allowedFilters = ['today', 'yesterday', 'last7days'];
 		if (filter && !allowedFilters.includes(filter) && (!startDate || !endDate)) {
 			return res.status(400).json({ success: false, error: 'Invalid filter parameter', message: `Filter must be one of: ${allowedFilters.join(', ')} or provide both startDate and endDate`, allowedFilters });
 		}
@@ -209,7 +187,7 @@ exports.getDialsDone = async (req, res) => {
 	try {
 		const humanAgentId = req.user.id;
 		const { filter, startDate, endDate } = req.query;
-		const allowedFilters = ['all', 'today', 'yesterday', 'last7days'];
+		const allowedFilters = ['today', 'yesterday', 'last7days'];
 		if (filter && !allowedFilters.includes(filter) && !startDate && !endDate) {
 			return res.status(400).json({ error: 'Invalid filter parameter' });
 		}
@@ -253,45 +231,42 @@ const { makeSingleCall, startCampaignCalling } = require('../services/campaignCa
 
 // Resolve the canonical client ID used in Group/Campaign documents (string userId)
 async function resolveClientUserId(user) {
-    // In tokens: clients often have userId string; humanAgents often carry Client _id (ObjectId)
-    const candidate = user?.clientId;
-    // If it's a non-ObjectId string (likely already userId), return as-is
-    if (typeof candidate === 'string' && candidate && candidate.length !== 24) {
-        return candidate;
-    }
-    // Otherwise look up the Client document by _id and return its userId
-    try {
-        const clientDoc = await Client.findById(candidate).select('userId').lean();
-        if (clientDoc?.userId) return clientDoc.userId;
-    } catch (_) {}
-    // Fallback to string form of candidate
-    return String(candidate || '');
+	// In tokens: clients often have userId string; humanAgents often carry Client _id (ObjectId)
+	const candidate = user?.clientId;
+	// If it's a non-ObjectId string (likely already userId), return as-is
+	if (typeof candidate === 'string' && candidate && candidate.length !== 24) {
+		return candidate;
+	}
+	// Otherwise look up the Client document by _id and return its userId
+	try {
+		const clientDoc = await Client.findById(candidate).select('userId').lean();
+		if (clientDoc?.userId) return clientDoc.userId;
+	} catch (_) { }
+	// Fallback to string form of candidate
+	return String(candidate || '');
 }
 
 function uniqueNonEmpty(values = []) {
-    const set = new Set();
-    const out = [];
-    for (const v of values) {
-        const s = String(v || '').trim();
-        if (!s) continue;
-        if (!set.has(s)) { set.add(s); out.push(s); }
-    }
-    return out;
+	const set = new Set();
+	const out = [];
+	for (const v of values) {
+		const s = String(v || '').trim();
+		if (!s) continue;
+		if (!set.has(s)) { set.add(s); out.push(s); }
+	}
+	return out;
 }
 
 async function getClientIdCandidates(user) {
-    const rawFromToken = String(user?.clientId || '');
-    const resolvedUserId = await resolveClientUserId(user);
-    return uniqueNonEmpty([rawFromToken, resolvedUserId]);
+	const rawFromToken = String(user?.clientId || '');
+	const resolvedUserId = await resolveClientUserId(user);
+	return uniqueNonEmpty([rawFromToken, resolvedUserId]);
 }
 
 // Build date filter helper identical to client routes behavior
 function buildDateFilter(filter, startDate, endDate) {
 	let dateFilter = {};
-	if (filter === 'all') {
-		// No date filtering - return empty object to show all records
-		dateFilter = {};
-	} else if (filter === 'today') {
+	if (filter === 'today') {
 		const today = new Date();
 		const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
 		const endOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59, 999);
@@ -316,7 +291,7 @@ function buildDateFilter(filter, startDate, endDate) {
 }
 
 function validateFilter(filter, startDate, endDate) {
-	const allowedFilters = ['all', 'today', 'yesterday', 'last7days'];
+	const allowedFilters = ['today', 'yesterday', 'last7days'];
 	if (filter && !allowedFilters.includes(filter) && (!startDate || !endDate)) {
 		return {
 			success: false,
@@ -635,7 +610,7 @@ exports.getOutboundLeads = async (req, res) => {
 // ============ Human Agent: Groups (reuse client logic with clientId from token) ============
 exports.createGroup = async (req, res) => {
 	try {
-        const clientId = await resolveClientUserId(req.user);
+		const clientId = await resolveClientUserId(req.user);
 		const ownerType = req.user.userType === 'humanAgent' ? 'humanAgent' : 'client';
 		const ownerId = req.user.id;
 		const { name, category, description } = req.body;
@@ -653,22 +628,21 @@ exports.createGroup = async (req, res) => {
 
 exports.listGroups = async (req, res) => {
 	try {
-        const candidates = await getClientIdCandidates(req.user);
-        const ownerType = req.user.userType === 'humanAgent' ? 'humanAgent' : 'client';
-        const ownerId = new (require('mongoose')).Types.ObjectId(String(req.user.id));
-        const ownerParam = String(req.query.owner || '').toLowerCase();
-        const orConditions = ownerParam === 'assign'
-            ? [ { assignedHumanAgents: ownerId } ]
-            : [ { ownerType, ownerId }, { assignedHumanAgents: ownerId } ];
-        
-        // Show groups owned by the current actor OR groups assigned to the current human agent
-        const groups = await Group.aggregate([
-            { 
-                $match: { 
-                    clientId: { $in: candidates },
-                    $or: orConditions
-                } 
-            },
+		const candidates = await getClientIdCandidates(req.user);
+		const ownerType = req.user.userType === 'humanAgent' ? 'humanAgent' : 'client';
+		const ownerId = new (require('mongoose')).Types.ObjectId(String(req.user.id));
+
+		// Show groups owned by the current actor OR groups assigned to the current human agent
+		const groups = await Group.aggregate([
+			{
+				$match: {
+					clientId: { $in: candidates },
+					$or: [
+						{ ownerType, ownerId }, // Groups owned by current actor
+						{ assignedHumanAgents: ownerId } // Groups assigned to current human agent
+					]
+				}
+			},
 			{ $sort: { createdAt: -1 } },
 			{
 				$lookup: {
@@ -687,10 +661,10 @@ exports.listGroups = async (req, res) => {
 				}
 			},
 			{
-				$project: { 
-					name: 1, 
-					category: 1, 
-					description: 1, 
+				$project: {
+					name: 1,
+					category: 1,
+					description: 1,
 					clientId: 1,
 					ownerType: 1,
 					ownerId: 1,
@@ -719,10 +693,10 @@ exports.listGroups = async (req, res) => {
 							}
 						}
 					},
-					createdAt: 1, 
-					updatedAt: 1, 
-					contactsCount: { $size: { $ifNull: ["$contacts", []] } } 
-				} 
+					createdAt: 1,
+					updatedAt: 1,
+					contactsCount: { $size: { $ifNull: ["$contacts", []] } }
+				}
 			}
 		]);
 		return res.json({ success: true, data: groups });
@@ -734,7 +708,7 @@ exports.listGroups = async (req, res) => {
 
 exports.updateGroup = async (req, res) => {
 	try {
-        const clientId = await resolveClientUserId(req.user);
+		const clientId = await resolveClientUserId(req.user);
 		const ownerType = req.user.userType === 'humanAgent' ? 'humanAgent' : 'client';
 		const ownerId = req.user.id;
 		const { id } = req.params;
@@ -752,21 +726,21 @@ exports.updateGroup = async (req, res) => {
 
 exports.getGroup = async (req, res) => {
 	try {
-        const candidates = await getClientIdCandidates(req.user);
-        const ownerType = req.user.userType === 'humanAgent' ? 'humanAgent' : 'client';
-        const ownerId = new (require('mongoose')).Types.ObjectId(String(req.user.id));
+		const candidates = await getClientIdCandidates(req.user);
+		const ownerType = req.user.userType === 'humanAgent' ? 'humanAgent' : 'client';
+		const ownerId = new (require('mongoose')).Types.ObjectId(String(req.user.id));
 		const { id } = req.params;
-        
-        // Show group if owned by current actor OR assigned to current human agent
-        const group = await Group.findOne({ 
-            _id: id, 
-            clientId: { $in: candidates },
-            $or: [
-                { ownerType, ownerId }, // Groups owned by current actor
-                { assignedHumanAgents: ownerId } // Groups assigned to current human agent
-            ]
-        }).populate('assignedHumanAgents', 'humanAgentName email role');
-        
+
+		// Show group if owned by current actor OR assigned to current human agent
+		const group = await Group.findOne({
+			_id: id,
+			clientId: { $in: candidates },
+			$or: [
+				{ ownerType, ownerId }, // Groups owned by current actor
+				{ assignedHumanAgents: ownerId } // Groups assigned to current human agent
+			]
+		}).populate('assignedHumanAgents', 'humanAgentName email role');
+
 		if (!group) return res.status(404).json({ success: false, error: 'Group not found' });
 		return res.json({ success: true, data: group });
 	} catch (e) {
@@ -777,7 +751,7 @@ exports.getGroup = async (req, res) => {
 
 exports.deleteGroup = async (req, res) => {
 	try {
-        const clientId = await resolveClientUserId(req.user);
+		const clientId = await resolveClientUserId(req.user);
 		const ownerType = req.user.userType === 'humanAgent' ? 'humanAgent' : 'client';
 		const ownerId = req.user.id;
 		const { id } = req.params;
@@ -789,7 +763,7 @@ exports.deleteGroup = async (req, res) => {
 };
 
 // ============ Human Agent: Group Contacts (secured by ownership) ============
-exports.getGroupsContacts = async (req, res) =>{
+exports.getGroupsContacts = async (req, res) => {
 	try {
 		const candidates = await getClientIdCandidates(req.user);
 		const ownerType = req.user.userType === 'humanAgent' ? 'humanAgent' : 'client';
@@ -926,7 +900,7 @@ exports.deleteContactFromGroup = async (req, res) => {
 // ============ Human Agent: Campaigns ============
 exports.createCampaign = async (req, res) => {
 	try {
-        const clientId = await resolveClientUserId(req.user);
+		const clientId = await resolveClientUserId(req.user);
 		const ownerType = req.user.userType === 'humanAgent' ? 'humanAgent' : 'client';
 		const ownerId = req.user.id;
 		const { name, description, groupIds, category, agent, isRunning } = req.body || {};
@@ -951,7 +925,7 @@ exports.createCampaign = async (req, res) => {
 
 exports.attachGroupsToCampaign = async (req, res) => {
 	try {
-        const clientId = await resolveClientUserId(req.user);
+		const clientId = await resolveClientUserId(req.user);
 		const ownerType = req.user.userType === 'humanAgent' ? 'humanAgent' : 'client';
 		const ownerId = req.user.id;
 		const { id } = req.params;
@@ -973,7 +947,7 @@ exports.attachGroupsToCampaign = async (req, res) => {
 
 exports.startCampaign = async (req, res) => {
 	try {
-        const clientId = await resolveClientUserId(req.user);
+		const clientId = await resolveClientUserId(req.user);
 		const ownerType = req.user.userType === 'humanAgent' ? 'humanAgent' : 'client';
 		const ownerId = req.user.id;
 		const { id } = req.params;
@@ -1069,536 +1043,99 @@ exports.singleCall = async (req, res) => {
 
 // Assign group to human agents (teams) - accessible by clients
 exports.assignGroupToHumanAgents = async (req, res) => {
-  try {
-    const { groupId } = req.params;
-    const { humanAgentIds } = req.body;
-    const { resolveClientUserId } = require('./humanAgentController');
-    if (!Array.isArray(humanAgentIds) || humanAgentIds.length === 0) {
-      return res.status(400).json({ 
-        success: false,
-        error: 'humanAgentIds array is required and must not be empty' 
-      });
-    }
-    // Get client ID from token
-    const clientId = await resolveClientUserId(req.user);
-    // Validate that the group exists and belongs to the client
-    const Group = require('../models/Group');
-    const group = await Group.findOne({ _id: groupId, clientId });
-    if (!group) {
-      return res.status(404).json({ 
-        success: false,
-        error: 'Group not found' 
-      });
-    }
-    // Validate that all human agents exist and belong to the client
-    const HumanAgent = require('../models/HumanAgent');
-    const humanAgents = await HumanAgent.find({ 
-      _id: { $in: humanAgentIds }, 
-      clientId 
-    });
-    if (humanAgents.length !== humanAgentIds.length) {
-      return res.status(400).json({ 
-        success: false,
-        error: 'Some human agents not found or don\'t belong to client' 
-      });
-    }
-    // Update the group with assigned human agents
-    group.assignedHumanAgents = humanAgentIds;
-    await group.save();
-    // Populate the assigned human agents for response
-    const updatedGroup = await Group.findById(groupId)
-      .populate('assignedHumanAgents', 'humanAgentName email role')
-      .lean();
-    res.json({ 
-      success: true, 
-      data: updatedGroup,
-      message: `Group assigned to ${humanAgentIds.length} human agent(s) successfully` 
-    });
-  } catch (error) {
-    console.error('Error assigning group to human agents:', error);
-    res.status(500).json({ 
-      success: false,
-      error: 'Failed to assign group to human agents' 
-    });
-  }
+	try {
+		const { groupId } = req.params;
+		const { humanAgentIds } = req.body;
+		const { resolveClientUserId } = require('./humanAgentController');
+		if (!Array.isArray(humanAgentIds) || humanAgentIds.length === 0) {
+			return res.status(400).json({
+				success: false,
+				error: 'humanAgentIds array is required and must not be empty'
+			});
+		}
+		// Get client ID from token
+		const clientId = await resolveClientUserId(req.user);
+		// Validate that the group exists and belongs to the client
+		const Group = require('../models/Group');
+		const group = await Group.findOne({ _id: groupId, clientId });
+		if (!group) {
+			return res.status(404).json({
+				success: false,
+				error: 'Group not found'
+			});
+		}
+		// Validate that all human agents exist and belong to the client
+		const HumanAgent = require('../models/HumanAgent');
+		const humanAgents = await HumanAgent.find({
+			_id: { $in: humanAgentIds },
+			clientId
+		});
+		if (humanAgents.length !== humanAgentIds.length) {
+			return res.status(400).json({
+				success: false,
+				error: 'Some human agents not found or don\'t belong to client'
+			});
+		}
+		// Update the group with assigned human agents
+		group.assignedHumanAgents = humanAgentIds;
+		await group.save();
+		// Populate the assigned human agents for response
+		const updatedGroup = await Group.findById(groupId)
+			.populate('assignedHumanAgents', 'humanAgentName email role')
+			.lean();
+		res.json({
+			success: true,
+			data: updatedGroup,
+			message: `Group assigned to ${humanAgentIds.length} human agent(s) successfully`
+		});
+	} catch (error) {
+		console.error('Error assigning group to human agents:', error);
+		res.status(500).json({
+			success: false,
+			error: 'Failed to assign group to human agents'
+		});
+	}
 };
 
 // Get human agents for assignment - accessible by clients
 exports.getHumanAgentsForAssignment = async (req, res) => {
-  try {
-    const { resolveClientUserId } = require('./humanAgentController');
-    // resolveClientUserId returns canonical client userId (string) in our system; 
-    // HumanAgent.model uses ObjectId for clientId, so convert when possible
-    const canonical = await resolveClientUserId(req.user);
-    const mongoose = require('mongoose');
-    let clientIdFilter;
-    // If canonical looks like ObjectId, use it; otherwise map Client by userId first
-    if (canonical && typeof canonical === 'string' && canonical.length === 24) {
-      clientIdFilter = new mongoose.Types.ObjectId(canonical);
-    } else {
-      const Client = require('../models/Client');
-      const clientDoc = await Client.findOne({ userId: canonical }).select('_id').lean();
-      clientIdFilter = clientDoc?._id || null;
-    }
-    if (!clientIdFilter) {
-      return res.json({ success: true, data: [] });
-    }
-    const HumanAgent = require('../models/HumanAgent');
-    const humanAgents = await HumanAgent.find({ 
-      clientId: clientIdFilter,
-      isApproved: true 
-    }).select('humanAgentName email role createdAt').lean();
-    res.json({ 
-      success: true, 
-      data: humanAgents 
-    });
-  } catch (error) {
-    console.error('Error fetching human agents:', error);
-    res.status(500).json({ 
-      success: false,
-      error: 'Failed to fetch human agents' 
-    });
-  }
+	try {
+		const { resolveClientUserId } = require('./humanAgentController');
+		// resolveClientUserId returns canonical client userId (string) in our system; 
+		// HumanAgent.model uses ObjectId for clientId, so convert when possible
+		const canonical = await resolveClientUserId(req.user);
+		const mongoose = require('mongoose');
+		let clientIdFilter;
+		// If canonical looks like ObjectId, use it; otherwise map Client by userId first
+		if (canonical && typeof canonical === 'string' && canonical.length === 24) {
+			clientIdFilter = new mongoose.Types.ObjectId(canonical);
+		} else {
+			const Client = require('../models/Client');
+			const clientDoc = await Client.findOne({ userId: canonical }).select('_id').lean();
+			clientIdFilter = clientDoc?._id || null;
+		}
+		if (!clientIdFilter) {
+			return res.json({ success: true, data: [] });
+		}
+		const HumanAgent = require('../models/HumanAgent');
+		const humanAgents = await HumanAgent.find({
+			clientId: clientIdFilter,
+			isApproved: true
+		}).select('humanAgentName email role createdAt').lean();
+		res.json({
+			success: true,
+			data: humanAgents
+		});
+	} catch (error) {
+		console.error('Error fetching human agents:', error);
+		res.status(500).json({
+			success: false,
+			error: 'Failed to fetch human agents'
+		});
+	}
 };
 
-// Get campaigns with assigned contacts summary for human agent
-exports.getAssignedCampaigns = async (req, res) => {
-  try {
-    const humanAgentId = req.user.id;
-    const { filter, startDate, endDate } = req.query;
-    
-    // Validate filter parameters
-    const validation = validateFilter(filter, startDate, endDate);
-    if (validation) return res.status(400).json(validation);
-    
-    const dateFilter = buildDateFilter(filter, startDate, endDate);
-    
-    // Find campaign history documents where this human agent is assigned to contacts
-    const CampaignHistory = require('../models/CampaignHistory');
-    const Campaign = require('../models/Campaign');
-    
-    const campaignHistories = await CampaignHistory.find({
-      'contacts.assignedToHumanAgents.humanAgentId': humanAgentId,
-      ...dateFilter
-    }).lean();
-    
-    // Group contacts by campaign
-    const campaignStats = {};
-    
-    for (const history of campaignHistories) {
-      const campaignId = String(history.campaignId);
-      
-      if (!campaignStats[campaignId]) {
-        campaignStats[campaignId] = {
-          campaignId,
-          totalAssignedContacts: 0,
-          connectedContacts: 0,
-          notConnectedContacts: 0,
-          lastAssignedAt: null,
-          runIds: new Set(),
-          phoneSet: new Set()
-        };
-      }
-      
-      for (const contact of history.contacts || []) {
-        const isAssigned = contact.assignedToHumanAgents?.some(
-          assignment => String(assignment.humanAgentId) === String(humanAgentId)
-        );
-        
-        if (isAssigned) {
-          campaignStats[campaignId].totalAssignedContacts++;
-          campaignStats[campaignId].runIds.add(history.runId);
-          
-          // Check connection status
-          if (contact.leadStatus && !['not_connected'].includes(contact.leadStatus)) {
-            campaignStats[campaignId].connectedContacts++;
-          } else {
-            campaignStats[campaignId].notConnectedContacts++;
-          }
-
-          // Track phone numbers for updated-by-me computation
-          const raw = String(contact.number || '').trim();
-          const digits = raw.replace(/[^0-9]/g, '');
-          const plusPref = digits ? `+${digits}` : raw;
-          [raw, digits, plusPref].filter(Boolean).forEach(p => campaignStats[campaignId].phoneSet.add(p));
-          
-          // Get the assignment details for this human agent
-          const assignment = contact.assignedToHumanAgents.find(
-            assignment => String(assignment.humanAgentId) === String(humanAgentId)
-          );
-          
-          if (assignment?.assignedAt) {
-            const assignedAt = new Date(assignment.assignedAt);
-            if (!campaignStats[campaignId].lastAssignedAt || assignedAt > campaignStats[campaignId].lastAssignedAt) {
-              campaignStats[campaignId].lastAssignedAt = assignedAt;
-            }
-          }
-        }
-      }
-    }
-    
-    // Get campaign details
-    const campaignIds = Object.keys(campaignStats);
-    const campaigns = await Campaign.find({ _id: { $in: campaignIds } })
-      .select('name description category createdAt')
-      .lean();
-    
-    const campaignMap = new Map(campaigns.map(c => [String(c._id), c]));
-    
-    // Build response
-    const assignedCampaigns = [];
-
-    for (const stats of Object.values(campaignStats)) {
-      // Compute updated-by-me count using MyDials with phone set
-      let updatedByMe = 0;
-      try {
-        const MyDialsModel = require('../models/MyDials');
-        const phoneArr = Array.from(stats.phoneSet);
-        if (phoneArr.length > 0) {
-          updatedByMe = await MyDialsModel.countDocuments({ humanAgentId, phoneNumber: { $in: phoneArr } });
-        }
-      } catch (_) {}
-
-      const campaign = campaignMap.get(stats.campaignId);
-      const connectionRate = stats.totalAssignedContacts > 0 
-        ? Math.round((stats.connectedContacts / stats.totalAssignedContacts) * 100) 
-        : 0;
-
-      assignedCampaigns.push({
-        campaignId: stats.campaignId,
-        campaignName: campaign?.name || 'Unknown Campaign',
-        description: campaign?.description || '',
-        category: campaign?.category || '',
-        totalAssignedContacts: stats.totalAssignedContacts,
-        connectedContacts: stats.connectedContacts,
-        notConnectedContacts: stats.notConnectedContacts,
-        connectionRate,
-        lastAssignedAt: stats.lastAssignedAt,
-        totalRuns: stats.runIds.size,
-        campaignCreatedAt: campaign?.createdAt,
-        updatedByMe
-      });
-    }
-    
-    // Sort by last assigned date (most recent first)
-    assignedCampaigns.sort((a, b) => new Date(b.lastAssignedAt) - new Date(a.lastAssignedAt));
-    
-    res.json({
-      success: true,
-      data: assignedCampaigns,
-      filter: { 
-        applied: filter || 'all', 
-        startDate: dateFilter.createdAt?.$gte, 
-        endDate: dateFilter.createdAt?.$lte 
-      }
-    });
-    
-  } catch (error) {
-    console.error('Error fetching assigned campaigns for human agent:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to fetch assigned campaigns'
-    });
-  }
-};
-
-// Get assigned contacts for specific campaign for human agent
-exports.getAssignedContacts = async (req, res) => {
-  try {
-    const humanAgentId = req.user.id;
-    const { campaignId, filter, startDate, endDate, page = 1, limit = 20 } = req.query;
-    
-    // Validate required campaignId
-    if (!campaignId) {
-      return res.status(400).json({
-        success: false,
-        error: 'campaignId is required'
-      });
-    }
-    
-    // Validate filter parameters
-    const validation = validateFilter(filter, startDate, endDate);
-    if (validation) return res.status(400).json(validation);
-    
-    const dateFilter = buildDateFilter(filter, startDate, endDate);
-    const pageNum = parseInt(page);
-    const limitNum = parseInt(limit);
-    const skip = (pageNum - 1) * limitNum;
-    
-    // Find campaign history documents for the specific campaign where this human agent is assigned to contacts
-    const CampaignHistory = require('../models/CampaignHistory');
-    const Campaign = require('../models/Campaign');
-    
-    const campaignHistories = await CampaignHistory.find({
-      campaignId: campaignId,
-      'contacts.assignedToHumanAgents.humanAgentId': humanAgentId,
-      ...dateFilter
-    }).lean();
-    
-    // Extract assigned contacts for this human agent from the specific campaign
-    let assignedContacts = [];
-    for (const history of campaignHistories) {
-      for (const contact of history.contacts || []) {
-        // Check if this contact is assigned to the current human agent
-        const isAssigned = contact.assignedToHumanAgents?.some(
-          assignment => String(assignment.humanAgentId) === String(humanAgentId)
-        );
-        
-        if (isAssigned) {
-          // Get the assignment details for this human agent
-          const assignment = contact.assignedToHumanAgents.find(
-            assignment => String(assignment.humanAgentId) === String(humanAgentId)
-          );
-          
-          // Fetch latest disposition from MyDials for this agent+phone (normalize phone formats)
-          let currentDisposition = null;
-          try {
-            const raw = String(contact.number || '').trim();
-            const digits = raw.replace(/[^0-9]/g, '');
-            const plusPref = digits ? `+${digits}` : raw;
-            const phoneCandidates = Array.from(new Set([raw, digits, plusPref].filter(Boolean)));
-            const MyDialsModel = require('../models/MyDials');
-            const d = await MyDialsModel.findOne({ humanAgentId, phoneNumber: { $in: phoneCandidates } })
-              .sort({ updatedAt: -1 })
-              .lean();
-            currentDisposition = d?.leadStatus || null;
-          } catch (_) {}
-
-          assignedContacts.push({
-            ...contact,
-            campaignHistoryId: history._id,
-            campaignId: history.campaignId,
-            runId: history.runId,
-            instanceNumber: history.instanceNumber,
-            assignedAt: assignment?.assignedAt,
-            assignedBy: assignment?.assignedBy,
-            // Prefer latest disposition saved by agent over history value
-            leadStatus: currentDisposition || contact.leadStatus || null
-          });
-        }
-      }
-    }
-    
-    // Sort by assignment date (most recent first)
-    assignedContacts.sort((a, b) => new Date(b.assignedAt) - new Date(a.assignedAt));
-    
-    // Get total count for pagination
-    const totalCount = assignedContacts.length;
-    
-    // Apply pagination
-    const paginatedContacts = assignedContacts.slice(skip, skip + limitNum);
-    
-    // Get campaign details
-    const campaign = await Campaign.findById(campaignId)
-      .select('name description')
-      .lean();
-    
-    // Add campaign info to contacts
-    const contactsWithCampaignInfo = paginatedContacts.map(contact => ({
-      ...contact,
-      campaignName: campaign?.name || 'Unknown Campaign',
-      campaignDescription: campaign?.description || ''
-    }));
-    
-    const totalPages = Math.ceil(totalCount / limitNum);
-    const hasNextPage = pageNum < totalPages;
-    const hasPrevPage = pageNum > 1;
-    
-    res.json({
-      success: true,
-      data: contactsWithCampaignInfo,
-      campaignInfo: {
-        campaignId,
-		campaignCategory: campaign?.category || '',
-        campaignName: campaign?.name || '',
-        campaignDescription: campaign?.description || ''
-      },
-      pagination: {
-        currentPage: pageNum,
-        totalPages,
-        totalItems: totalCount,
-        itemsPerPage: limitNum,
-        hasNextPage,
-        hasPrevPage,
-        nextPage: hasNextPage ? pageNum + 1 : null,
-        prevPage: hasPrevPage ? pageNum - 1 : null
-      },
-      filter: { 
-        applied: filter || 'all', 
-        startDate: dateFilter.createdAt?.$gte, 
-        endDate: dateFilter.createdAt?.$lte 
-      }
-    });
-    
-  } catch (error) {
-    console.error('Error fetching assigned contacts for human agent:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to fetch assigned contacts'
-    });
-  }
-};
 // Export helper function
 module.exports.resolveClientUserId = resolveClientUserId;
-// Human Agent KPI for client list view: assigned count and updated-by-agent count
-exports.getAgentDispositionStats = async (req, res) => {
-  try {
-    const clientId = await resolveClientUserId(req.user);
-    const { humanAgentId } = req.query;
-    if (!humanAgentId) return res.status(400).json({ success: false, message: 'humanAgentId is required' });
 
-    // Count assigned contacts across campaign histories for this client and agent
-    const CampaignHistory = require('../models/CampaignHistory');
-    // Pull phone numbers assigned to this humanAgent across histories
-    const histories = await CampaignHistory.find({ 'contacts.assignedToHumanAgents.humanAgentId': humanAgentId })
-      .select('contacts')
-      .lean();
-
-    let assignedCount = 0;
-    const phoneSet = new Set();
-    for (const h of histories) {
-      for (const c of h.contacts || []) {
-        const isAssigned = (c.assignedToHumanAgents || []).some(a => String(a.humanAgentId) === String(humanAgentId));
-        if (isAssigned) {
-          assignedCount++;
-          const raw = String(c.number || '').trim();
-          const digits = raw.replace(/[^0-9]/g, '');
-          const plusPref = digits ? `+${digits}` : raw;
-          [raw, digits, plusPref].filter(Boolean).forEach(p => phoneSet.add(p));
-        }
-      }
-    }
-
-    // Count updates by this agent from MyDials (restrict to phones gathered and agent)
-    let updatedByAgent = 0;
-    try {
-      const MyDialsModel = require('../models/MyDials');
-      const phones = Array.from(phoneSet);
-      if (phones.length > 0) {
-        updatedByAgent = await MyDialsModel.countDocuments({ humanAgentId, phoneNumber: { $in: phones } });
-      }
-    } catch (_) {}
-
-    return res.json({ success: true, data: { humanAgentId, assignedCount, updatedByAgent } });
-  } catch (e) {
-    console.error('getAgentDispositionStats error:', e);
-    return res.status(500).json({ success: false, message: 'Failed to fetch stats' });
-  }
-};
-
-
-// List all client associations for the current human agent (by same email)
-exports.listMyClientAssociations = async (req, res) => {
-  try {
-    if (!req.user || req.user.userType !== 'humanAgent') {
-      return res.status(403).json({ success: false, message: 'Only human agent can view associations' });
-    }
-    const currentAgent = await HumanAgent.findById(req.user.id);
-    if (!currentAgent) {
-      return res.status(401).json({ success: false, message: 'Current agent not found' });
-    }
-    const agents = await HumanAgent.find({ email: currentAgent.email, isApproved: true })
-      .populate('clientId')
-      .lean();
-    const associations = agents.map(a => ({
-      humanAgentId: a._id,
-      clientId: a.clientId?._id || null,
-      clientUserId: a.clientId?.userId || null,
-      clientName: a.clientId?.businessName || a.clientId?.name || a.clientId?.email || null,
-      isApproved: !!a.isApproved,
-      isprofileCompleted: !!a.isprofileCompleted,
-      type: a.role
-    }));
-    return res.json({ success: true, associations });
-  } catch (e) {
-    console.error('listMyClientAssociations error:', e);
-    return res.status(500).json({ success: false, message: 'Failed to list associations' });
-  }
-};
-
-// ============ Human Agent: Switch across own client associations ============
-// Allows a human agent (self token) to switch to another client association of the same email
-// Requires: humanAgent token with allowSwitch === true
-exports.switchAgentContext = async (req, res) => {
-  try {
-    // Only humanAgent tokens can switch here
-    if (!req.user || req.user.userType !== 'humanAgent') {
-      return res.status(403).json({ success: false, message: 'Only human agent can switch context' });
-    }
-
-    // Ensure current token allows switching
-    try {
-      const authHeader = req.headers.authorization || '';
-      const bearer = authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : null;
-      if (!bearer) return res.status(401).json({ success: false, message: 'Missing token' });
-      const decoded = jwt.verify(bearer, process.env.JWT_SECRET);
-      const isHuman = decoded && decoded.userType === 'humanAgent';
-      const allowSwitch = decoded?.allowSwitch;
-      const legacyOk = typeof allowSwitch === 'undefined'; // backward-compat tokens
-      const aliasAccessTrue = decoded?.access === true; // alias if you used 'access'
-      if (!(isHuman && (allowSwitch === true || legacyOk || aliasAccessTrue))) {
-        return res.status(403).json({ success: false, message: 'Switch not allowed for this agent token' });
-      }
-    } catch (e) {
-      return res.status(401).json({ success: false, message: 'Invalid token' });
-    }
-
-    // Infer target agent id from body (accept profile object or minimal)
-    const body = req.body || {};
-    const targetId = body.id || body._id || body.humanAgentId;
-    if (!targetId) {
-      return res.status(400).json({ success: false, message: 'Target agent id is required' });
-    }
-
-    // Current agent email
-    const currentAgent = await HumanAgent.findById(req.user.id);
-    if (!currentAgent) {
-      return res.status(401).json({ success: false, message: 'Current agent not found' });
-    }
-
-    // Find target association by same email
-    const targetAgent = await HumanAgent.findOne({ _id: targetId, email: currentAgent.email }).populate('clientId');
-    if (!targetAgent) {
-      return res.status(404).json({ success: false, message: 'Target agent association not found for this email' });
-    }
-    if (!targetAgent.isApproved) {
-      return res.status(401).json({ success: false, message: 'Target agent association not approved' });
-    }
-    if (!targetAgent.clientId) {
-      return res.status(400).json({ success: false, message: 'Associated client not found' });
-    }
-
-    // Issue new humanAgent token (self) allowing further switches
-    const token = jwt.sign({ 
-      id: targetAgent._id, 
-      userType: 'humanAgent', 
-      clientId: targetAgent.clientId._id, 
-      email: targetAgent.email,
-      aud: 'humanAgent',
-      allowSwitch: true
-    }, process.env.JWT_SECRET, { expiresIn: '7d' });
-
-    const humanAgentProfileId = await Profile.findOne({ humanAgentId: targetAgent._id });
-    const clientProfileId = await Profile.findOne({ clientId: targetAgent.clientId._id });
-
-    return res.json({
-      success: true,
-      token,
-      userType: 'humanAgent',
-      id: targetAgent._id,
-      email: targetAgent.email,
-      name: targetAgent.humanAgentName,
-      isApproved: !!targetAgent.isApproved,
-      isprofileCompleted: !!targetAgent.isprofileCompleted,
-      clientId: targetAgent.clientId._id,
-      clientUserId: targetAgent.clientId.userId,
-      clientName: targetAgent.clientId.businessName || targetAgent.clientId.name || targetAgent.clientId.email,
-      humanAgentProfileId: humanAgentProfileId ? humanAgentProfileId._id : null,
-      clientProfileId: clientProfileId ? clientProfileId._id : null
-    });
-  } catch (error) {
-    console.error('switchAgentContext error:', error);
-    return res.status(500).json({ success: false, message: 'Failed to switch agent context' });
-  }
-};
 

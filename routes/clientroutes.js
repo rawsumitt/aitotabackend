@@ -2336,17 +2336,15 @@ router.post('/groups/:id/contacts', extractClientId, async (req, res) => {
   }
 });
 
-// Assign group to human agents (teams)
+// Assign group to human agents OR assign individual contacts (unified endpoint)
+// Use query param: ?owner=assign for individual contact assignment
 router.post('/groups/:groupId/assign', extractClientId, async (req, res) => {
   try {
     const { groupId } = req.params;
-    const { humanAgentIds } = req.body;
-    if (!Array.isArray(humanAgentIds) || humanAgentIds.length === 0) {
-      return res.status(400).json({ 
-        success: false,
-        error: 'humanAgentIds array is required and must not be empty' 
-      });
-    }
+    const { owner } = req.query; // Check if owner=assign for individual contact assignment
+    const { humanAgentIds, contactIds, agentId, humanAgentId } = req.body;
+    const mongoose = require('mongoose');
+    
     // Validate that the group exists and belongs to the client
     const group = await Group.findOne({ _id: groupId, clientId: req.clientId });
     if (!group) {
@@ -2355,6 +2353,235 @@ router.post('/groups/:groupId/assign', extractClientId, async (req, res) => {
         error: 'Group not found' 
       });
     }
+    
+    // INDIVIDUAL CONTACT ASSIGNMENT (when owner=assign)
+    if (owner === 'assign') {
+      // Support both agentId and humanAgentId for backward compatibility
+      const targetHumanAgentId = humanAgentId || agentId;
+      
+      // Validate required fields with STRICT LIMITS to prevent memory issues
+      if (!contactIds || !Array.isArray(contactIds) || contactIds.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'contactIds array is required and must not be empty'
+        });
+      }
+      
+      // CRITICAL: Limit contactIds to prevent memory overflow
+      if (contactIds.length > 100) {
+        return res.status(400).json({
+          success: false,
+          error: 'Maximum 100 contacts can be assigned at once'
+        });
+      }
+      
+      // Limit to first 100 for safety
+      const limitedContactIds = contactIds.slice(0, 100);
+      
+      if (!targetHumanAgentId) {
+        return res.status(400).json({
+          success: false,
+          error: 'agentId or humanAgentId is required'
+        });
+      }
+      
+      // Validate that the human agent exists and belongs to the client
+      const HumanAgent = require('../models/HumanAgent');
+      const clientIdForQuery = mongoose.Types.ObjectId.isValid(req.clientId) 
+        ? new mongoose.Types.ObjectId(req.clientId) 
+        : req.clientId;
+      
+      const humanAgent = await HumanAgent.findOne({
+        _id: targetHumanAgentId,
+        clientId: clientIdForQuery,
+        isApproved: true
+      });
+      
+      if (!humanAgent) {
+        const agentCheck = await HumanAgent.findOne({
+          _id: targetHumanAgentId,
+          clientId: clientIdForQuery
+        });
+        
+        if (!agentCheck) {
+          return res.status(404).json({
+            success: false,
+            error: 'Human agent not found or does not belong to client'
+          });
+        } else if (!agentCheck.isApproved) {
+          return res.status(403).json({
+            success: false,
+            error: 'Human agent is not approved'
+          });
+        }
+        
+        return res.status(404).json({
+          success: false,
+          error: 'Human agent not found'
+        });
+      }
+      
+      // Validate that all contacts exist in the group
+      // SAFETY: Check group size first to prevent memory issues
+      if (!group.contacts || !Array.isArray(group.contacts)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Group has no contacts'
+        });
+      }
+      
+      // CRITICAL: If group has too many contacts, limit processing
+      const MAX_GROUP_CONTACTS = 1000;
+      const contactsToCheck = group.contacts.length > MAX_GROUP_CONTACTS 
+        ? group.contacts.slice(0, MAX_GROUP_CONTACTS)
+        : group.contacts;
+      
+      const existingContactIds = contactsToCheck.map(c => String(c._id || c.id));
+      const contactIdsStr = limitedContactIds.map(id => String(id));
+      const invalidContactIds = contactIdsStr.filter(id => !existingContactIds.includes(id));
+      
+      if (invalidContactIds.length > 0) {
+        return res.status(400).json({
+          success: false,
+          error: `Some contacts not found in group: ${invalidContactIds.join(', ')}`
+        });
+      }
+      
+      // Convert to ObjectIds
+      const humanAgentObjectId = mongoose.Types.ObjectId.isValid(targetHumanAgentId) 
+        ? new mongoose.Types.ObjectId(targetHumanAgentId) 
+        : targetHumanAgentId;
+      const clientObjectId = mongoose.Types.ObjectId.isValid(req.clientId) 
+        ? new mongoose.Types.ObjectId(req.clientId) 
+        : req.clientId;
+      
+      // Prepare assignment data
+      const assignmentData = {
+        humanAgentId: humanAgentObjectId,
+        assignedAt: new Date(),
+        assignedBy: clientObjectId
+      };
+      
+      // Use atomic MongoDB updates with bulkWrite to avoid version conflicts
+      // This is more reliable than in-memory modification + save()
+      const contactObjectIds = contactIdsStr
+        .map(id => {
+          try {
+            return mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : null;
+          } catch {
+            return null;
+          }
+        })
+        .filter(Boolean);
+      
+      if (contactObjectIds.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid contact IDs provided'
+        });
+      }
+      
+      // Use bulkWrite with positional operator to update each contact atomically
+      // Filter ensures we only update if not already assigned
+      let updatedCount = 0;
+      const updateOps = [];
+      
+      for (const contactIdStr of contactIdsStr) {
+        try {
+          const contactObjId = mongoose.Types.ObjectId.isValid(contactIdStr) 
+            ? new mongoose.Types.ObjectId(contactIdStr) 
+            : null;
+          
+          if (!contactObjId) continue;
+          
+          // Only add assignment if not already present
+          updateOps.push({
+            updateOne: {
+              filter: {
+                _id: groupId,
+                clientId: req.clientId,
+                'contacts._id': contactObjId,
+                'contacts.assignedToHumanAgents.humanAgentId': { $ne: humanAgentObjectId }
+              },
+              update: {
+                $push: {
+                  'contacts.$.assignedToHumanAgents': assignmentData
+                }
+              }
+            }
+          });
+        } catch (err) {
+          console.error('Error preparing update for contact:', contactIdStr, err);
+        }
+      }
+      
+      if (updateOps.length > 0) {
+        const bulkResult = await Group.bulkWrite(updateOps, { ordered: false });
+        updatedCount = bulkResult.modifiedCount || 0;
+      }
+      
+      // Fetch updated group to get assigned contacts
+      const updatedGroup = await Group.findOne(
+        { _id: groupId, clientId: req.clientId },
+        { contacts: { $elemMatch: { _id: { $in: contactObjectIds } } } }
+      ).lean();
+      
+      // SIMPLE response - get assigned contacts from updated group
+      const assignedContactsResult = [];
+      const contactIdsStrSet = new Set(contactIdsStr);
+      
+      if (updatedGroup && updatedGroup.contacts) {
+        const MAX_RESPONSE_CONTACTS = 50; // Hard limit on response
+        const contactsToProcess = updatedGroup.contacts.slice(0, MAX_RESPONSE_CONTACTS);
+        
+        for (const contact of contactsToProcess) {
+          if (!contact) continue;
+          
+          if (contactIdsStrSet.has(String(contact._id))) {
+            assignedContactsResult.push({
+              _id: contact._id,
+              name: contact.name || '',
+              phone: contact.phone || '',
+              email: contact.email || '',
+              status: contact.status || 'default'
+            });
+          }
+        }
+      }
+      
+      // Return group data + assigned contacts (simple response)
+      res.json({
+        success: true,
+        message: `Successfully assigned ${updatedCount} contact(s) to human agent`,
+        data: {
+          group: {
+            _id: group._id,
+            name: group.name,
+            description: group.description || '',
+            category: group.category || '',
+            clientId: group.clientId
+          },
+          assignedContactsCount: updatedCount,
+          humanAgent: {
+            _id: humanAgent._id,
+            humanAgentName: humanAgent.humanAgentName,
+            email: humanAgent.email,
+            role: humanAgent.role
+          },
+          assignedContacts: assignedContactsResult
+        }
+      });
+      return;
+    }
+    
+    // WHOLE GROUP ASSIGNMENT (default behavior)
+    if (!Array.isArray(humanAgentIds) || humanAgentIds.length === 0) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'humanAgentIds array is required and must not be empty' 
+      });
+    }
+    
     // Validate that all human agents exist and belong to the client
     const HumanAgent = require('../models/HumanAgent');
     const humanAgents = await HumanAgent.find({ 
@@ -2367,26 +2594,30 @@ router.post('/groups/:groupId/assign', extractClientId, async (req, res) => {
         error: 'Some human agents not found or don\'t belong to client' 
       });
     }
+    
     // Add new human agents to assignedHumanAgents array (no duplicates)
     const currentAssigned = Array.isArray(group.assignedHumanAgents) ? group.assignedHumanAgents.map(id => String(id)) : [];
     const newAssigned = humanAgentIds.map(id => String(id));
     const mergedAssigned = Array.from(new Set([...currentAssigned, ...newAssigned]));
     group.assignedHumanAgents = mergedAssigned;
     await group.save();
+    
     // Populate the assigned human agents for response
     const updatedGroup = await Group.findById(groupId)
       .populate('assignedHumanAgents', 'humanAgentName email role')
       .lean();
+    
     res.json({ 
       success: true, 
       data: updatedGroup,
       message: `Group assigned to ${humanAgentIds.length} human agent(s) successfully` 
     });
   } catch (error) {
-    console.error('Error assigning group to human agents:', error);
+    console.error('Error assigning group/contacts:', error);
+    console.error('Error stack:', error.stack);
     res.status(500).json({ 
       success: false,
-      error: 'Failed to assign group to human agents' 
+      error: 'Failed to assign group/contacts' 
     });
   }
 });
