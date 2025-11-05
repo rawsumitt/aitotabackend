@@ -9,6 +9,8 @@ const {
 	getOutboundLogs,
 	getInboundLeads,
 	getOutboundLeads,
+	getAssignedCampaigns,
+	getAssignedContacts,
 	createGroup,
 	listGroups,
 	updateGroup,
@@ -39,6 +41,10 @@ router.get('/outbound/logs', verifyClientOrHumanAgentToken, getOutboundLogs);
 // Leads
 router.get('/inbound/leads', verifyClientOrHumanAgentToken, getInboundLeads);
 router.get('/outbound/leads', verifyClientOrHumanAgentToken, getOutboundLeads);
+
+// Assigned AI leads (campaigns and contacts) for current human agent
+router.get('/assigned-campaigns', verifyClientOrHumanAgentToken, getAssignedCampaigns);
+router.get('/assigned-contacts', verifyClientOrHumanAgentToken, getAssignedContacts);
 
 // Groups (human-agent)
 router.get('/groups', verifyClientOrHumanAgentToken, listGroups);

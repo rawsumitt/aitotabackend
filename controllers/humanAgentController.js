@@ -29,7 +29,7 @@ exports.getDialsReport = async (req, res) => {
 	try {
 		const humanAgentId = req.user.id;
 		const { filter, startDate, endDate } = req.query;
-		const allowedFilters = ['today', 'yesterday', 'last7days'];
+    const allowedFilters = ['all', 'today', 'yesterday', 'last7days'];
 		if (filter && !allowedFilters.includes(filter) && (!startDate || !endDate)) {
 			return res.status(400).json({ success: false, error: 'Invalid filter parameter', message: `Filter must be one of: ${allowedFilters.join(', ')} or provide both startDate and endDate`, allowedFilters });
 		}
@@ -73,7 +73,7 @@ exports.getDialsLeads = async (req, res) => {
 	try {
 		const humanAgentId = req.user.id;
 		const { filter, startDate, endDate } = req.query;
-		const allowedFilters = ['today', 'yesterday', 'last7days'];
+    const allowedFilters = ['all', 'today', 'yesterday', 'last7days'];
 		if (filter && !allowedFilters.includes(filter) && (!startDate || !endDate)) {
 			return res.status(400).json({ success: false, error: 'Invalid filter parameter', message: `Filter must be one of: ${allowedFilters.join(', ')} or provide both startDate and endDate`, allowedFilters });
 		}
@@ -187,7 +187,7 @@ exports.getDialsDone = async (req, res) => {
 	try {
 		const humanAgentId = req.user.id;
 		const { filter, startDate, endDate } = req.query;
-		const allowedFilters = ['today', 'yesterday', 'last7days'];
+    const allowedFilters = ['all', 'today', 'yesterday', 'last7days'];
 		if (filter && !allowedFilters.includes(filter) && !startDate && !endDate) {
 			return res.status(400).json({ error: 'Invalid filter parameter' });
 		}
@@ -266,6 +266,10 @@ async function getClientIdCandidates(user) {
 // Build date filter helper identical to client routes behavior
 function buildDateFilter(filter, startDate, endDate) {
 	let dateFilter = {};
+    if (filter === 'all' || !filter) {
+        // No date filtering
+        return {};
+    }
 	if (filter === 'today') {
 		const today = new Date();
 		const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
@@ -291,7 +295,7 @@ function buildDateFilter(filter, startDate, endDate) {
 }
 
 function validateFilter(filter, startDate, endDate) {
-	const allowedFilters = ['today', 'yesterday', 'last7days'];
+    const allowedFilters = ['all', 'today', 'yesterday', 'last7days'];
 	if (filter && !allowedFilters.includes(filter) && (!startDate || !endDate)) {
 		return {
 			success: false,
@@ -631,18 +635,52 @@ exports.listGroups = async (req, res) => {
 		const candidates = await getClientIdCandidates(req.user);
 		const ownerType = req.user.userType === 'humanAgent' ? 'humanAgent' : 'client';
 		const ownerId = new (require('mongoose')).Types.ObjectId(String(req.user.id));
+        const ownerParam = String(req.query.owner || '').toLowerCase();
 
-		// Show groups owned by the current actor OR groups assigned to the current human agent
-		const groups = await Group.aggregate([
-			{
+		// Build pipeline conditionally when filtering only assigned items
+		const pipeline = [];
+		if (ownerParam === 'assign') {
+			pipeline.push({
 				$match: {
 					clientId: { $in: candidates },
 					$or: [
-						{ ownerType, ownerId }, // Groups owned by current actor
-						{ assignedHumanAgents: ownerId } // Groups assigned to current human agent
+						{ assignedHumanAgents: ownerId },
+						{ 'contacts.assignedToHumanAgents.humanAgentId': ownerId }
 					]
 				}
-			},
+			});
+			// derive assigned contacts for count
+			pipeline.push({
+				$addFields: {
+					__assignedContacts: {
+						$filter: {
+							input: { $ifNull: [ '$contacts', [] ] },
+							as: 'c',
+							cond: {
+								$in: [ ownerId, {
+									$map: {
+										input: { $ifNull: [ '$$c.assignedToHumanAgents', [] ] },
+										as: 'a',
+										in: '$$a.humanAgentId'
+									}
+								} ]
+							}
+						}
+					}
+				}
+			});
+		} else {
+			pipeline.push({
+				$match: {
+					clientId: { $in: candidates },
+					$or: [
+						{ ownerType, ownerId },
+						{ assignedHumanAgents: ownerId }
+					]
+				}
+			});
+		}
+		pipeline.push(
 			{ $sort: { createdAt: -1 } },
 			{
 				$lookup: {
@@ -695,10 +733,17 @@ exports.listGroups = async (req, res) => {
 					},
 					createdAt: 1,
 					updatedAt: 1,
-					contactsCount: { $size: { $ifNull: ["$contacts", []] } }
+					contactsCount: ownerParam === 'assign'
+						? { $size: { $ifNull: [ '$__assignedContacts', [] ] } }
+						: { $size: { $ifNull: [ '$contacts', [] ] } },
+					assignedContactsCount: ownerParam === 'assign'
+						? { $size: { $ifNull: [ '$__assignedContacts', [] ] } }
+						: { $literal: undefined }
 				}
 			}
-		]);
+		);
+
+		const groups = await Group.aggregate(pipeline);
 		return res.json({ success: true, data: groups });
 	} catch (e) {
 		console.error('Error fetching groups (human-agent):', e);
@@ -764,26 +809,40 @@ exports.deleteGroup = async (req, res) => {
 
 // ============ Human Agent: Group Contacts (secured by ownership) ============
 exports.getGroupsContacts = async (req, res) => {
-	try {
-		const candidates = await getClientIdCandidates(req.user);
-		const ownerType = req.user.userType === 'humanAgent' ? 'humanAgent' : 'client';
-		const ownerId = new (require('mongoose')).Types.ObjectId(String(req.user.id));
-		const { id } = req.params; // group id
-		// Allow access if group is owned by user or assigned to user
-		const group = await Group.findOne({
-			_id: id,
-			clientId: { $in: candidates },
-			$or: [
-				{ ownerType, ownerId },
-				{ assignedHumanAgents: ownerId }
-			]
-		});
-		if (!group) return res.status(404).json({ success: false, error: 'Group not found' });
-		return res.json({ success: true, data: group.contacts || [] });
-	} catch (e) {
-		console.error('Error fetching group contacts (human-agent):', e);
-		return res.status(500).json({ success: false, error: 'Failed to fetch group contacts' });
-	}
+    try {
+        const candidates = await getClientIdCandidates(req.user);
+        const ownerType = req.user.userType === 'humanAgent' ? 'humanAgent' : 'client';
+        const ownerId = new (require('mongoose')).Types.ObjectId(String(req.user.id));
+        const { id } = req.params; // group id
+        // Allow access if owned, group-assigned, or contact-assigned
+        const group = await Group.findOne({
+            _id: id,
+            clientId: { $in: candidates },
+            $or: [
+                { ownerType, ownerId },
+                { assignedHumanAgents: ownerId },
+                { 'contacts.assignedToHumanAgents.humanAgentId': ownerId }
+            ]
+        });
+        if (!group) return res.status(404).json({ success: false, error: 'Group not found' });
+
+        let contacts = Array.isArray(group.contacts) ? group.contacts : [];
+        const isOwner = (group.ownerType === 'humanAgent') && String(group.ownerId) === String(ownerId);
+        const isGroupAssigned = (group.assignedHumanAgents || []).some(a => String(a) === String(ownerId));
+        if (!isOwner && !isGroupAssigned) {
+            // Only show contacts assigned to this agent
+            contacts = contacts.filter(c => (c.assignedToHumanAgents || []).some(a => String(a.humanAgentId) === String(ownerId)));
+            contacts = contacts.map(c => {
+                const a = (c.assignedToHumanAgents || []).find(x => String(x.humanAgentId) === String(ownerId));
+                const base = c.toObject ? c.toObject() : c;
+                return { ...base, assignedAt: a?.assignedAt || base.assignedAt, assignedBy: a?.assignedBy || base.assignedBy };
+            });
+        }
+        return res.json({ success: true, data: contacts });
+    } catch (e) {
+        console.error('Error fetching group contacts (human-agent):', e);
+        return res.status(500).json({ success: false, error: 'Failed to fetch group contacts' });
+    }
 }
 
 exports.addContactToGroup = async (req, res) => {
@@ -1138,4 +1197,191 @@ exports.getHumanAgentsForAssignment = async (req, res) => {
 // Export helper function
 module.exports.resolveClientUserId = resolveClientUserId;
 
+
+// Get campaigns with assigned contacts summary for human agent
+exports.getAssignedCampaigns = async (req, res) => {
+  try {
+    const humanAgentId = req.user.id;
+    const { filter, startDate, endDate } = req.query;
+    const validation = validateFilter(filter, startDate, endDate);
+    if (validation) return res.status(400).json(validation);
+
+    const dateFilter = buildDateFilter(filter, startDate, endDate);
+    const CampaignHistory = require('../models/CampaignHistory');
+    const Campaign = require('../models/Campaign');
+
+    const histories = await CampaignHistory.find({
+      'contacts.assignedToHumanAgents.humanAgentId': humanAgentId,
+      ...dateFilter
+    }).lean();
+
+    const campaignStats = {};
+    for (const h of histories) {
+      const cid = String(h.campaignId);
+      if (!campaignStats[cid]) {
+        campaignStats[cid] = {
+          campaignId: cid,
+          totalAssignedContacts: 0,
+          connectedContacts: 0,
+          notConnectedContacts: 0,
+          lastAssignedAt: null,
+          runIds: new Set(),
+          phoneSet: new Set()
+        };
+      }
+      for (const c of h.contacts || []) {
+        const isAssigned = (c.assignedToHumanAgents || []).some(a => String(a.humanAgentId) === String(humanAgentId));
+        if (!isAssigned) continue;
+        campaignStats[cid].totalAssignedContacts++;
+        campaignStats[cid].runIds.add(h.runId);
+        if (c.leadStatus && c.leadStatus !== 'not_connected') {
+          campaignStats[cid].connectedContacts++;
+        } else {
+          campaignStats[cid].notConnectedContacts++;
+        }
+        const raw = String(c.number || '').trim();
+        const digits = raw.replace(/\D/g, '');
+        const plus = digits ? `+${digits}` : raw;
+        [raw, digits, plus].filter(Boolean).forEach(p => campaignStats[cid].phoneSet.add(p));
+        const a = (c.assignedToHumanAgents || []).find(a => String(a.humanAgentId) === String(humanAgentId));
+        if (a?.assignedAt) {
+          const t = new Date(a.assignedAt);
+          if (!campaignStats[cid].lastAssignedAt || t > campaignStats[cid].lastAssignedAt) {
+            campaignStats[cid].lastAssignedAt = t;
+          }
+        }
+      }
+    }
+
+    const campaignIds = Object.keys(campaignStats);
+    const campaignDocs = await Campaign.find({ _id: { $in: campaignIds } })
+      .select('name description category createdAt')
+      .lean();
+    const cmap = new Map(campaignDocs.map(c => [String(c._id), c]));
+
+    const assignedCampaigns = [];
+    for (const stats of Object.values(campaignStats)) {
+      let updatedByMe = 0;
+      try {
+        const MyDialsModel = require('../models/MyDials');
+        const phones = Array.from(stats.phoneSet);
+        if (phones.length > 0) {
+          updatedByMe = await MyDialsModel.countDocuments({ humanAgentId, phoneNumber: { $in: phones } });
+        }
+      } catch (_) {}
+
+      const c = cmap.get(stats.campaignId);
+      const connectionRate = stats.totalAssignedContacts
+        ? Math.round((stats.connectedContacts / stats.totalAssignedContacts) * 100)
+        : 0;
+      assignedCampaigns.push({
+        campaignId: stats.campaignId,
+        campaignName: c?.name || 'Unknown Campaign',
+        description: c?.description || '',
+        category: c?.category || '',
+        totalAssignedContacts: stats.totalAssignedContacts,
+        connectedContacts: stats.connectedContacts,
+        notConnectedContacts: stats.notConnectedContacts,
+        connectionRate,
+        lastAssignedAt: stats.lastAssignedAt,
+        totalRuns: stats.runIds.size,
+        campaignCreatedAt: c?.createdAt,
+        updatedByMe
+      });
+    }
+
+    assignedCampaigns.sort((a, b) => new Date(b.lastAssignedAt) - new Date(a.lastAssignedAt));
+    return res.json({ success: true, data: assignedCampaigns, filter: { applied: filter || 'all', startDate: dateFilter.createdAt?.$gte, endDate: dateFilter.createdAt?.$lte } });
+  } catch (error) {
+    console.error('Error fetching assigned campaigns for human agent:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch assigned campaigns' });
+  }
+};
+
+// Get assigned contacts for specific campaign for human agent
+exports.getAssignedContacts = async (req, res) => {
+  try {
+    const humanAgentId = req.user.id;
+    const { campaignId, filter, startDate, endDate, page = 1, limit = 20 } = req.query;
+    if (!campaignId) return res.status(400).json({ success: false, error: 'campaignId is required' });
+    const validation = validateFilter(filter, startDate, endDate);
+    if (validation) return res.status(400).json(validation);
+
+    const dateFilter = buildDateFilter(filter, startDate, endDate);
+    const pageNum = Number.parseInt(page);
+    const limitNum = Number.parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+
+    const CampaignHistory = require('../models/CampaignHistory');
+    const Campaign = require('../models/Campaign');
+    const histories = await CampaignHistory.find({
+      campaignId,
+      'contacts.assignedToHumanAgents.humanAgentId': humanAgentId,
+      ...dateFilter
+    }).lean();
+
+    const out = [];
+    for (const h of histories) {
+      for (const c of h.contacts || []) {
+        const isAssigned = (c.assignedToHumanAgents || []).some(a => String(a.humanAgentId) === String(humanAgentId));
+        if (!isAssigned) continue;
+        // latest disposition from MyDials
+        let currentDisposition = null;
+        try {
+          const raw = String(c.number || '').trim();
+          const digits = raw.replace(/\D/g, '');
+          const plus = digits ? `+${digits}` : raw;
+          const phoneCandidates = Array.from(new Set([raw, digits, plus].filter(Boolean)));
+          const MyDialsModel = require('../models/MyDials');
+          const d = await MyDialsModel.findOne({ humanAgentId, phoneNumber: { $in: phoneCandidates } })
+            .sort({ updatedAt: -1 })
+            .lean();
+          currentDisposition = d?.leadStatus || null;
+        } catch (_) {}
+
+        const a = (c.assignedToHumanAgents || []).find(x => String(x.humanAgentId) === String(humanAgentId));
+        out.push({
+          ...c,
+          campaignHistoryId: h._id,
+          campaignId: h.campaignId,
+          runId: h.runId,
+          instanceNumber: h.instanceNumber,
+          assignedAt: a?.assignedAt,
+          assignedBy: a?.assignedBy,
+          leadStatus: currentDisposition || c.leadStatus || null
+        });
+      }
+    }
+
+    out.sort((a, b) => new Date(b.assignedAt) - new Date(a.assignedAt));
+    const totalCount = out.length;
+    const paginated = out.slice(skip, skip + limitNum);
+    const campaign = await Campaign.findById(campaignId).select('name description category').lean();
+
+    return res.json({
+      success: true,
+      data: paginated,
+      campaignInfo: {
+        campaignId,
+        campaignCategory: campaign?.category || '',
+        campaignName: campaign?.name || '',
+        campaignDescription: campaign?.description || ''
+      },
+      pagination: {
+        currentPage: pageNum,
+        totalPages: Math.ceil(totalCount / limitNum),
+        totalItems: totalCount,
+        itemsPerPage: limitNum,
+        hasNextPage: pageNum * limitNum < totalCount,
+        hasPrevPage: pageNum > 1,
+        nextPage: pageNum * limitNum < totalCount ? pageNum + 1 : null,
+        prevPage: pageNum > 1 ? pageNum - 1 : null
+      },
+      filter: { applied: filter || 'all', startDate: dateFilter.createdAt?.$gte, endDate: dateFilter.createdAt?.$lte }
+    });
+  } catch (error) {
+    console.error('Error fetching assigned contacts for human agent:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch assigned contacts' });
+  }
+};
 
