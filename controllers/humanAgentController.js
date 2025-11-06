@@ -5,8 +5,8 @@ exports.addDial = async (req, res) => {
 	try {
 		const humanAgentId = req.user.id;
 		const { category,subCategory, phoneNumber, leadStatus, contactName, date, other } = req.body;
-		if (!category || !phoneNumber || !contactName) {
-			return res.status(400).json({ success: false, message: "Missing required fields. Required: category, phoneNumber, contactName" });
+		if (!category || !phoneNumber) {
+			return res.status(400).json({ success: false, message: "Missing required fields. Required: category, phoneNumber" });
 		}
 		const dial = await MyDials.create({
 			humanAgentId,
@@ -15,7 +15,7 @@ exports.addDial = async (req, res) => {
 			subCategory,
 			leadStatus,
 			phoneNumber,
-			contactName,
+			contactName: contactName || "",
 			date,
 			other
 		});
@@ -356,7 +356,7 @@ const LEAD_STATUS_MAPPING = {
         }
     },
     notConnected: {
-        dnp: ['no_response', 'call_bussy'],
+        dnp: ['no_response', 'call_busy'],
         cnc: ['not_reachable', 'switched_off', 'out_of_coverage'],
         other: ['call_disconnected', 'call_later']
     }
