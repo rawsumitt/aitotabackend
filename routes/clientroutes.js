@@ -2500,8 +2500,12 @@ router.post('/groups/:groupId/assign', extractClientId, async (req, res) => {
               filter: {
                 _id: groupId,
                 clientId: req.clientId,
-                'contacts._id': contactObjId,
-                'contacts.assignedToHumanAgents.humanAgentId': { $ne: humanAgentObjectId }
+                contacts: {
+                  $elemMatch: {
+                    _id: contactObjId,
+                    'assignedToHumanAgents.humanAgentId': { $ne: humanAgentObjectId }
+                  }
+                }
               },
               update: {
                 $push: {

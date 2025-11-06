@@ -15,6 +15,10 @@ const MyDialSchema = new mongoose.Schema({
     type: String,
     require: true,
   },
+  subCategory:{
+    type: String,
+    require: true,
+  },
   leadStatus:{
     type: String,
     required: true

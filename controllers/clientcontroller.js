@@ -2366,7 +2366,7 @@ module.exports = {
   getHumanAgentById,
   loginHumanAgent,
   loginHumanAgentGoogle,
-    assignCampaignHistoryContactsToHumanAgents,
+  assignCampaignHistoryContactsToHumanAgents,
   googleListApprovedProfiles,
   googleSelectProfile,
   listApprovedProfilesForCurrentUser,

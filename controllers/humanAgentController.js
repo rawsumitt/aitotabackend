@@ -1,10 +1,10 @@
 // ===================== MY DIALS (Human Agent) ===============================
 const MyDials = require('../models/MyDials');
 
-exports.addDial = async (req, res) => {
+exports.addDial = async (req, res) => { 
 	try {
 		const humanAgentId = req.user.id;
-		const { category, phoneNumber, leadStatus, contactName, date, other } = req.body;
+		const { category,subCategory, phoneNumber, leadStatus, contactName, date, other } = req.body;
 		if (!category || !phoneNumber || !contactName) {
 			return res.status(400).json({ success: false, message: "Missing required fields. Required: category, phoneNumber, contactName" });
 		}
@@ -12,6 +12,7 @@ exports.addDial = async (req, res) => {
 			humanAgentId,
 			clientId: req.user.clientId,
 			category,
+			subCategory,
 			leadStatus,
 			phoneNumber,
 			contactName,
@@ -59,10 +60,45 @@ exports.getDialsReport = async (req, res) => {
 		const logs = await MyDials.find(query);
 		const totalCalls = logs.length;
 		const totalConnected = logs.filter(l => l.category === 'connected').length;
-		const totalNotConnected = logs.filter(l => l.category === 'not connected').length;
+		const totalNotConnected = logs.filter(l => l.category === 'not_connected').length;
+		
+		// Get sub-category counts for connected calls
+		const connectedBreakdown = {
+			converted: logs.filter(l => l.category === 'connected' && l.subCategory === 'converted').length,
+			hotLeads: logs.filter(l => l.category === 'connected' && l.subCategory === 'hot_leads').length,
+			warmLeads: logs.filter(l => l.category === 'connected' && l.subCategory === 'warm_leads').length,
+			closedLost: logs.filter(l => l.category === 'connected' && l.subCategory === 'closed_lost').length,
+			other: logs.filter(l => l.category === 'connected' && l.subCategory === 'other').length
+		};
+
+		// Get sub-category counts for not connected calls
+		const notConnectedBreakdown = {
+			dnp: logs.filter(l => l.category === 'not_connected' && l.subCategory === 'dnp').length,
+			cnc: logs.filter(l => l.category === 'not_connected' && l.subCategory === 'cnc').length,
+			other: logs.filter(l => l.category === 'not_connected' && l.subCategory === 'other').length
+		};
+
 		const totalConversationTime = logs.reduce((sum, l) => sum + (l.duration || 0), 0);
 		const avgCallDuration = totalCalls ? totalConversationTime / totalCalls : 0;
-		res.json({ success: true, data: { humanAgentId, totalCalls, totalConnected, totalNotConnected, totalConversationTime, avgCallDuration }, filter: { applied: filter || 'all', startDate: dateFilter.createdAt?.$gte, endDate: dateFilter.createdAt?.$lte } });
+		
+		res.json({ 
+			success: true, 
+			data: { 
+				humanAgentId, 
+				totalCalls, 
+				totalConnected, 
+				totalNotConnected, 
+				connectedBreakdown,
+				notConnectedBreakdown,
+				totalConversationTime, 
+				avgCallDuration 
+			}, 
+			filter: { 
+				applied: filter || 'all', 
+				startDate: dateFilter.createdAt?.$gte, 
+				endDate: dateFilter.createdAt?.$lte 
+			} 
+		});
 	} catch (error) {
 		console.error('Error in /dials/report', error);
 		res.status(500).json({ error: 'Failed to fetch report' });
@@ -101,79 +137,150 @@ exports.getDialsLeads = async (req, res) => {
 		}
 		const query = { humanAgentId, ...dateFilter };
 		const logs = await MyDials.find(query).sort({ createdAt: -1 });
-		// Group leads according to the new leadStatus structure
+		
+		// Helper function to get all status arrays
+		const getAllStatuses = () => {
+			const statuses = [];
+			Object.values(LEAD_STATUS_MAPPING).forEach(mainCategory => {
+				Object.values(mainCategory).forEach(subCategory => {
+					Object.values(subCategory).forEach(miniCategory => {
+						if (Array.isArray(miniCategory)) {
+							statuses.push(...miniCategory);
+						}
+					});
+				});
+			});
+			return statuses;
+		};
+
+		// Group leads according to mini categories
 		const leads = {
-			veryInterested: {
-				data: logs.filter(l => l.leadStatus === 'vvi' || l.leadStatus === 'very interested'),
-				count: logs.filter(l => l.leadStatus === 'vvi' || l.leadStatus === 'very interested').length
+			// Connected - Interested: Hot Leads
+			'payment_pending': {
+				data: logs.filter(l => l.leadStatus === 'payment_pending'),
+				count: logs.filter(l => l.leadStatus === 'payment_pending').length
 			},
-			maybe: {
-				data: logs.filter(l => l.leadStatus === 'maybe' || l.leadStatus === 'medium'),
-				count: logs.filter(l => l.leadStatus === 'maybe' || l.leadStatus === 'medium').length
+			'Document_pending': {
+				data: logs.filter(l => l.leadStatus === 'Document_pending'),
+				count: logs.filter(l => l.leadStatus === 'Document_pending').length
 			},
-			enrolled: {
-				data: logs.filter(l => l.leadStatus === 'enrolled'),
-				count: logs.filter(l => l.leadStatus === 'enrolled').length
+			
+			// Connected - Interested: Warm Leads
+			'call_back_schedule': {
+				data: logs.filter(l => l.leadStatus === 'call_back_schedule'),
+				count: logs.filter(l => l.leadStatus === 'call_back_schedule').length
 			},
-			junkLead: {
-				data: logs.filter(l => l.leadStatus === 'junk lead'),
-				count: logs.filter(l => l.leadStatus === 'junk lead').length
+			'information_shared': {
+				data: logs.filter(l => l.leadStatus === 'information_shared'),
+				count: logs.filter(l => l.leadStatus === 'information_shared').length
 			},
-			notRequired: {
-				data: logs.filter(l => l.leadStatus === 'not required'),
-				count: logs.filter(l => l.leadStatus === 'not required').length
+			'follow_up_required': {
+				data: logs.filter(l => l.leadStatus === 'follow_up_required'),
+				count: logs.filter(l => l.leadStatus === 'follow_up_required').length
 			},
-			enrolledOther: {
-				data: logs.filter(l => l.leadStatus === 'enrolled other'),
-				count: logs.filter(l => l.leadStatus === 'enrolled other').length
+
+			// Connected - Interested: Follow Up
+			'call_back_due': {
+				data: logs.filter(l => l.leadStatus === 'call_back_due'),
+				count: logs.filter(l => l.leadStatus === 'call_back_due').length
 			},
-			decline: {
-				data: logs.filter(l => l.leadStatus === 'decline'),
-				count: logs.filter(l => l.leadStatus === 'decline').length
+			'whatsapp_sent': {
+				data: logs.filter(l => l.leadStatus === 'whatsapp_sent'),
+				count: logs.filter(l => l.leadStatus === 'whatsapp_sent').length
 			},
-			notEligible: {
-				data: logs.filter(l => l.leadStatus === 'not eligible'),
-				count: logs.filter(l => l.leadStatus === 'not eligible').length
+			'interested_waiting_confimation': {
+				data: logs.filter(l => l.leadStatus === 'interested_waiting_confimation'),
+				count: logs.filter(l => l.leadStatus === 'interested_waiting_confimation').length
 			},
-			wrongNumber: {
-				data: logs.filter(l => l.leadStatus === 'wrong number'),
-				count: logs.filter(l => l.leadStatus === 'wrong number').length
+
+			// Connected - Interested: Converted
+			'admission_confirmed': {
+				data: logs.filter(l => l.leadStatus === 'admission_confirmed'),
+				count: logs.filter(l => l.leadStatus === 'admission_confirmed').length
 			},
-			hotFollowup: {
-				data: logs.filter(l => l.leadStatus === 'hot followup'),
-				count: logs.filter(l => l.leadStatus === 'hot followup').length
+			'payment_recieved': {
+				data: logs.filter(l => l.leadStatus === 'payment_recieved'),
+				count: logs.filter(l => l.leadStatus === 'payment_recieved').length
 			},
-			coldFollowup: {
-				data: logs.filter(l => l.leadStatus === 'cold followup'),
-				count: logs.filter(l => l.leadStatus === 'cold followup').length
+			'course_started': {
+				data: logs.filter(l => l.leadStatus === 'course_started'),
+				count: logs.filter(l => l.leadStatus === 'course_started').length
 			},
-			schedule: {
-				data: logs.filter(l => l.leadStatus === 'schedule'),
-				count: logs.filter(l => l.leadStatus === 'schedule').length
+
+			// Connected - Not Interested: Closed/Lost
+			'not_interested': {
+				data: logs.filter(l => l.leadStatus === 'not_interested'),
+				count: logs.filter(l => l.leadStatus === 'not_interested').length
 			},
-			notConnected: {
-				data: logs.filter(l => l.leadStatus === 'not connected'),
-				count: logs.filter(l => l.leadStatus === 'not connected').length
+			'joined_another_institute': {
+				data: logs.filter(l => l.leadStatus === 'joined_another_institute'),
+				count: logs.filter(l => l.leadStatus === 'joined_another_institute').length
 			},
-			other: {
-				data: logs.filter(l => {
-					const predefinedStatuses = [
-						'vvi', 'very interested', 'maybe', 'medium', 'enrolled',
-						'junk lead', 'not required', 'enrolled other', 'decline',
-						'not eligible', 'wrong number', 'hot followup', 'cold followup',
-						'schedule', 'not connected'
-					];
-					return !predefinedStatuses.includes(l.leadStatus);
-				}),
-				count: logs.filter(l => {
-					const predefinedStatuses = [
-						'vvi', 'very interested', 'maybe', 'medium', 'enrolled',
-						'junk lead', 'not required', 'enrolled other', 'decline',
-						'not eligible', 'wrong number', 'hot followup', 'cold followup',
-						'schedule', 'not connected'
-					];
-					return !predefinedStatuses.includes(l.leadStatus);
-				}).length
+			'dropped_the_plan': {
+				data: logs.filter(l => l.leadStatus === 'dropped_the_plan'),
+				count: logs.filter(l => l.leadStatus === 'dropped_the_plan').length
+			},
+			'dnd': {
+				data: logs.filter(l => l.leadStatus === 'dnd'),
+				count: logs.filter(l => l.leadStatus === 'dnd').length
+			},
+			'unqualified_lead': {
+				data: logs.filter(l => l.leadStatus === 'unqualified_lead'),
+				count: logs.filter(l => l.leadStatus === 'unqualified_lead').length
+			},
+			'wrong_number': {
+				data: logs.filter(l => l.leadStatus === 'wrong_number'),
+				count: logs.filter(l => l.leadStatus === 'wrong_number').length
+			},
+			'invalid_number': {
+				data: logs.filter(l => l.leadStatus === 'invalid_number'),
+				count: logs.filter(l => l.leadStatus === 'invalid_number').length
+			},
+
+			// Connected - Not Interested: Future Prospect
+			'postpone': {
+				data: logs.filter(l => l.leadStatus === 'postpone'),
+				count: logs.filter(l => l.leadStatus === 'postpone').length
+			},
+
+			// Not Connected: DNP
+			'no_response': {
+				data: logs.filter(l => l.leadStatus === 'no_response'),
+				count: logs.filter(l => l.leadStatus === 'no_response').length
+			},
+			'call_busy': {
+				data: logs.filter(l => l.leadStatus === 'call_busy'),
+				count: logs.filter(l => l.leadStatus === 'call_busy').length
+			},
+
+			// Not Connected: CNC
+			'not_reachable': {
+				data: logs.filter(l => l.leadStatus === 'not_reachable'),
+				count: logs.filter(l => l.leadStatus === 'not_reachable').length
+			},
+			'switched_off': {
+				data: logs.filter(l => l.leadStatus === 'switched_off'),
+				count: logs.filter(l => l.leadStatus === 'switched_off').length
+			},
+			'out_of_coverage': {
+				data: logs.filter(l => l.leadStatus === 'out_of_coverage'),
+				count: logs.filter(l => l.leadStatus === 'out_of_coverage').length
+			},
+
+			// Not Connected: Other
+			'call_disconnected': {
+				data: logs.filter(l => l.leadStatus === 'call_disconnected'),
+				count: logs.filter(l => l.leadStatus === 'call_disconnected').length
+			},
+			'call_later': {
+				data: logs.filter(l => l.leadStatus === 'call_later'),
+				count: logs.filter(l => l.leadStatus === 'call_later').length
+			},
+
+			// For any status not covered above
+			'other': {
+				data: logs.filter(l => !getAllStatuses().includes(l.leadStatus)),
+				count: logs.filter(l => !getAllStatuses().includes(l.leadStatus)).length
 			}
 		};
 		res.json({ success: true, data: leads, filter: { applied: filter, startDate: dateFilter.createdAt?.$gte, endDate: dateFilter.createdAt?.$lte } });
@@ -215,9 +322,21 @@ exports.getDialsDone = async (req, res) => {
 			end.setHours(23, 59, 59, 999);
 			dateFilter = { createdAt: { $gte: start, $lte: end } };
 		}
-		const query = { humanAgentId, category: 'sale_done', ...dateFilter };
+		// Query only for converted statuses
+		const query = {
+			humanAgentId,
+			category: 'connected',
+			subCategory: 'converted',
+			...dateFilter
+		};
 		const data = await MyDials.find(query).sort({ createdAt: -1 });
-		res.json({ success: true, data, filter: { applied: filter, startDate: dateFilter.createdAt?.$gte, endDate: dateFilter.createdAt?.$lte } });
+
+		res.json({ 
+			success: true, 
+			data: data,
+			totalCount: data.length,
+			filter: { applied: filter, startDate: dateFilter.createdAt?.$gte, endDate: dateFilter.createdAt?.$lte } 
+		});
 	} catch (error) {
 		res.status(500).json({ error: 'Failed to fetch done dials' });
 	}
@@ -227,6 +346,98 @@ const Client = require('../models/Client');
 const Group = require('../models/Group');
 const Campaign = require('../models/Campaign');
 const Agent = require('../models/Agent');
+
+// Lead status mapping structure
+const LEAD_STATUS_MAPPING = {
+    connected: {
+        interested: {
+            hotLeads: ['payment_pending', 'Document_pending'],
+            warmLeads: ['call_back_schedule', 'information_shared', 'follow_up_required'],
+            followUp: ['call_back_due', 'whatsapp_sent', 'interested_waiting_confimation'],
+            converted: ['admission_confirmed', 'payment_recieved', 'course_started']
+        },
+        notInterested: {
+            closedLost: [
+                'not_interested', 'joined_another_institute', 'dropped_the_plan',
+                'dnd', 'unqualified_lead', 'wrong_number', 'invalid_number'
+            ],
+            futureProspect: ['postpone']
+        }
+    },
+    notConnected: {
+        dnp: ['no_response', 'call_bussy'],
+        cnc: ['not_reachable', 'switched_off', 'out_of_coverage'],
+        other: ['call_disconnected', 'call_later']
+    }
+};
+
+// Helper function to organize leads by status
+function organizeLeadsByStatus(logs) {
+    const leads = {
+        connected: {
+            interested: {
+                hotLeads: {
+                    data: logs.filter(l => LEAD_STATUS_MAPPING.connected.interested.hotLeads.includes(l.leadStatus)),
+                    count: logs.filter(l => LEAD_STATUS_MAPPING.connected.interested.hotLeads.includes(l.leadStatus)).length,
+                    statuses: LEAD_STATUS_MAPPING.connected.interested.hotLeads
+                },
+                warmLeads: {
+                    data: logs.filter(l => LEAD_STATUS_MAPPING.connected.interested.warmLeads.includes(l.leadStatus)),
+                    count: logs.filter(l => LEAD_STATUS_MAPPING.connected.interested.warmLeads.includes(l.leadStatus)).length,
+                    statuses: LEAD_STATUS_MAPPING.connected.interested.warmLeads
+                },
+                followUp: {
+                    data: logs.filter(l => LEAD_STATUS_MAPPING.connected.interested.followUp.includes(l.leadStatus)),
+                    count: logs.filter(l => LEAD_STATUS_MAPPING.connected.interested.followUp.includes(l.leadStatus)).length,
+                    statuses: LEAD_STATUS_MAPPING.connected.interested.followUp
+                },
+                converted: {
+                    data: logs.filter(l => LEAD_STATUS_MAPPING.connected.interested.converted.includes(l.leadStatus)),
+                    count: logs.filter(l => LEAD_STATUS_MAPPING.connected.interested.converted.includes(l.leadStatus)).length,
+                    statuses: LEAD_STATUS_MAPPING.connected.interested.converted
+                }
+            },
+            notInterested: {
+                closedLost: {
+                    data: logs.filter(l => LEAD_STATUS_MAPPING.connected.notInterested.closedLost.includes(l.leadStatus)),
+                    count: logs.filter(l => LEAD_STATUS_MAPPING.connected.notInterested.closedLost.includes(l.leadStatus)).length,
+                    statuses: LEAD_STATUS_MAPPING.connected.notInterested.closedLost
+                },
+                futureProspect: {
+                    data: logs.filter(l => LEAD_STATUS_MAPPING.connected.notInterested.futureProspect.includes(l.leadStatus)),
+                    count: logs.filter(l => LEAD_STATUS_MAPPING.connected.notInterested.futureProspect.includes(l.leadStatus)).length,
+                    statuses: LEAD_STATUS_MAPPING.connected.notInterested.futureProspect
+                }
+            }
+        },
+        notConnected: {
+            dnp: {
+                data: logs.filter(l => LEAD_STATUS_MAPPING.notConnected.dnp.includes(l.leadStatus)),
+                count: logs.filter(l => LEAD_STATUS_MAPPING.notConnected.dnp.includes(l.leadStatus)).length,
+                statuses: LEAD_STATUS_MAPPING.notConnected.dnp
+            },
+            cnc: {
+                data: logs.filter(l => LEAD_STATUS_MAPPING.notConnected.cnc.includes(l.leadStatus)),
+                count: logs.filter(l => LEAD_STATUS_MAPPING.notConnected.cnc.includes(l.leadStatus)).length,
+                statuses: LEAD_STATUS_MAPPING.notConnected.cnc
+            },
+            other: {
+                data: logs.filter(l => LEAD_STATUS_MAPPING.notConnected.other.includes(l.leadStatus)),
+                count: logs.filter(l => LEAD_STATUS_MAPPING.notConnected.other.includes(l.leadStatus)).length,
+                statuses: LEAD_STATUS_MAPPING.notConnected.other
+            }
+        }
+    };
+
+    // Add summary counts for each category
+    leads.connected.interested.totalCount = Object.values(leads.connected.interested).reduce((sum, cat) => sum + (cat.count || 0), 0);
+    leads.connected.notInterested.totalCount = Object.values(leads.connected.notInterested).reduce((sum, cat) => sum + (cat.count || 0), 0);
+    leads.connected.totalCount = leads.connected.interested.totalCount + leads.connected.notInterested.totalCount;
+    leads.notConnected.totalCount = Object.values(leads.notConnected).reduce((sum, cat) => sum + (cat.count || 0), 0);
+    leads.totalCount = leads.connected.totalCount + leads.notConnected.totalCount;
+
+    return leads;
+};
 const { makeSingleCall, startCampaignCalling } = require('../services/campaignCallingService');
 
 // Resolve the canonical client ID used in Group/Campaign documents (string userId)
@@ -670,13 +881,12 @@ exports.listGroups = async (req, res) => {
 				}
 			});
 		} else {
+			// Default view: Show only groups created by the user
 			pipeline.push({
 				$match: {
 					clientId: { $in: candidates },
-					$or: [
-						{ ownerType, ownerId },
-						{ assignedHumanAgents: ownerId }
-					]
+					ownerType,
+					ownerId
 				}
 			});
 		}
