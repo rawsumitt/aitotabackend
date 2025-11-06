@@ -138,21 +138,6 @@ exports.getDialsLeads = async (req, res) => {
 		const query = { humanAgentId, ...dateFilter };
 		const logs = await MyDials.find(query).sort({ createdAt: -1 });
 		
-		// Helper function to get all status arrays
-		const getAllStatuses = () => {
-			const statuses = [];
-			Object.values(LEAD_STATUS_MAPPING).forEach(mainCategory => {
-				Object.values(mainCategory).forEach(subCategory => {
-					Object.values(subCategory).forEach(miniCategory => {
-						if (Array.isArray(miniCategory)) {
-							statuses.push(...miniCategory);
-						}
-					});
-				});
-			});
-			return statuses;
-		};
-
 		// Group leads according to mini categories
 		const leads = {
 			// Connected - Interested: Hot Leads
@@ -275,13 +260,19 @@ exports.getDialsLeads = async (req, res) => {
 			'call_later': {
 				data: logs.filter(l => l.leadStatus === 'call_later'),
 				count: logs.filter(l => l.leadStatus === 'call_later').length
-			},
-
-			// For any status not covered above
-			'other': {
-				data: logs.filter(l => !getAllStatuses().includes(l.leadStatus)),
-				count: logs.filter(l => !getAllStatuses().includes(l.leadStatus)).length
 			}
+		};
+
+		// Get all explicitly defined status keys (excluding 'other')
+		const definedStatusKeys = Object.keys(leads);
+		
+		// For any status not covered above, add to 'other'
+		leads['other'] = {
+			data: logs.filter(l => {
+				// Only include if leadStatus is not one of the explicitly defined categories
+				return !definedStatusKeys.includes(l.leadStatus || '');
+			}),
+			count: logs.filter(l => !definedStatusKeys.includes(l.leadStatus || '')).length
 		};
 		res.json({ success: true, data: leads, filter: { applied: filter, startDate: dateFilter.createdAt?.$gte, endDate: dateFilter.createdAt?.$lte } });
 	} catch (error) {
