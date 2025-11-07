@@ -1030,11 +1030,12 @@ exports.deleteGroup = async (req, res) => {
 // ============ Human Agent: Group Contacts (secured by ownership) ============
 exports.getGroupsContacts = async (req, res) => {
     try {
+        const mongoose = require('mongoose');
         const candidates = await getClientIdCandidates(req.user);
         const ownerType = req.user.userType === 'humanAgent' ? 'humanAgent' : 'client';
-        const ownerId = new (require('mongoose')).Types.ObjectId(String(req.user.id));
+        const ownerId = new mongoose.Types.ObjectId(String(req.user.id));
         const { id } = req.params; // group id
-        // Allow access if owned, group-assigned, or contact-assigned
+
         const group = await Group.findOne({
             _id: id,
             clientId: { $in: candidates },
@@ -1046,19 +1047,225 @@ exports.getGroupsContacts = async (req, res) => {
         });
         if (!group) return res.status(404).json({ success: false, error: 'Group not found' });
 
-        let contacts = Array.isArray(group.contacts) ? group.contacts : [];
+        const toPlainContact = (contact) => (contact?.toObject ? contact.toObject() : contact);
         const isOwner = (group.ownerType === 'humanAgent') && String(group.ownerId) === String(ownerId);
         const isGroupAssigned = (group.assignedHumanAgents || []).some(a => String(a) === String(ownerId));
+
+        let contacts = Array.isArray(group.contacts) ? group.contacts : [];
+        let plainContacts;
+
         if (!isOwner && !isGroupAssigned) {
-            // Only show contacts assigned to this agent
-            contacts = contacts.filter(c => (c.assignedToHumanAgents || []).some(a => String(a.humanAgentId) === String(ownerId)));
-            contacts = contacts.map(c => {
-                const a = (c.assignedToHumanAgents || []).find(x => String(x.humanAgentId) === String(ownerId));
-                const base = c.toObject ? c.toObject() : c;
-                return { ...base, assignedAt: a?.assignedAt || base.assignedAt, assignedBy: a?.assignedBy || base.assignedBy };
-            });
+            plainContacts = contacts
+                .filter(c => (c.assignedToHumanAgents || []).some(a => String(a.humanAgentId) === String(ownerId)))
+                .map(c => {
+                    const assignment = (c.assignedToHumanAgents || []).find(x => String(x.humanAgentId) === String(ownerId));
+                    const base = toPlainContact(c);
+                    return {
+                        ...base,
+                        assignedAt: assignment?.assignedAt || base.assignedAt,
+                        assignedBy: assignment?.assignedBy || base.assignedBy
+                    };
+                });
+        } else {
+            plainContacts = contacts.map(toPlainContact);
         }
-        return res.json({ success: true, data: contacts });
+
+        if (!plainContacts.length) {
+            return res.json({ success: true, data: [] });
+        }
+
+        const fallbackNormalize = MyDials.normalizePhoneNumber || ((phone) => {
+            const digitsOnly = String(phone || '').replaceAll(/\D/g, '');
+            if (digitsOnly.length > 10) {
+                return digitsOnly.slice(-10);
+            }
+            return digitsOnly;
+        });
+
+        const normalizedPhonesSet = new Set();
+        for (const contact of plainContacts) {
+            const normalized = fallbackNormalize(contact?.phone || contact?.phoneNumber || '');
+            if (normalized) {
+                normalizedPhonesSet.add(normalized);
+            }
+        }
+
+        if (!normalizedPhonesSet.size) {
+            const contactsWithDisposition = plainContacts.map(contact => ({
+                ...contact,
+                dispositionStatus: 'not_disposed',
+                dispositionCount: 0,
+                lastDispositionAt: null,
+                lastLeadStatus: null,
+                lastDispositionCategory: null,
+                lastDispositionSubCategory: null
+            }));
+            return res.json({ success: true, data: contactsWithDisposition });
+        }
+
+        const normalizedPhones = Array.from(normalizedPhonesSet);
+
+        const contactMetaByNormalized = new Map();
+        plainContacts.forEach((contact, index) => {
+            const normalized = fallbackNormalize(contact?.phone || contact?.phoneNumber || '');
+            if (!normalized) return;
+            let thresholdDate = null;
+            if (contact.assignedAt) {
+                thresholdDate = new Date(contact.assignedAt);
+            } else if (contact.createdAt) {
+                thresholdDate = new Date(contact.createdAt);
+            } else if (group.createdAt) {
+                thresholdDate = new Date(group.createdAt);
+            }
+            if (!contactMetaByNormalized.has(normalized)) {
+                contactMetaByNormalized.set(normalized, []);
+            }
+            contactMetaByNormalized.get(normalized).push({ index, thresholdDate });
+        });
+
+        const clientIdValue = group.clientId;
+        const clientIdMatch = mongoose.Types.ObjectId.isValid(clientIdValue)
+            ? new mongoose.Types.ObjectId(clientIdValue)
+            : clientIdValue;
+
+        const baseMatch = {
+            clientId: clientIdMatch
+        };
+
+        if (req.user.userType === 'humanAgent') {
+            baseMatch.humanAgentId = ownerId;
+        } else if (req.query.humanAgentId && mongoose.Types.ObjectId.isValid(req.query.humanAgentId)) {
+            baseMatch.humanAgentId = new mongoose.Types.ObjectId(req.query.humanAgentId);
+        }
+
+        const dispositionDocs = await MyDials.aggregate([
+            { $match: baseMatch },
+            {
+                $addFields: {
+                    computedNormalizedPhone: {
+                        $let: {
+                            vars: {
+                                normalized: { $ifNull: ['$normalizedPhoneNumber', ''] },
+                                raw: { $ifNull: ['$phoneNumber', ''] }
+                            },
+                            in: {
+                                $cond: [
+                                    { $gt: [{ $strLenCP: '$$normalized' }, 0] },
+                                    '$$normalized',
+                                    {
+                                        $let: {
+                                            vars: {
+                                                digits: {
+                                                    $reduce: {
+                                                        input: {
+                                                            $regexFindAll: {
+                                                                input: '$$raw',
+                                                                regex: '[0-9]'
+                                                            }
+                                                        },
+                                                        initialValue: '',
+                                                        in: {
+                                                            $concat: ['$$value', '$$this.match']
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                            in: {
+                                                $let: {
+                                                    vars: {
+                                                        len: { $strLenCP: '$$digits' }
+                                                    },
+                                                    in: {
+                                                        $cond: [
+                                                            { $gt: ['$$len', 10] },
+                                                            {
+                                                                $substrCP: [
+                                                                    '$$digits',
+                                                                    { $subtract: ['$$len', 10] },
+                                                                    10
+                                                                ]
+                                                            },
+                                                            '$$digits'
+                                                        ]
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            },
+            {
+                $match: {
+                    computedNormalizedPhone: { $in: normalizedPhones }
+                }
+            },
+            {
+                $project: {
+                    computedNormalizedPhone: 1,
+                    createdAt: 1,
+                    leadStatus: 1,
+                    category: 1,
+                    subCategory: 1
+                }
+            },
+            { $sort: { createdAt: -1 } }
+        ]);
+
+        const dispositionDocsByNormalized = new Map();
+        for (const doc of dispositionDocs) {
+            const normalized = doc.computedNormalizedPhone;
+            if (!normalized) continue;
+            if (!dispositionDocsByNormalized.has(normalized)) {
+                dispositionDocsByNormalized.set(normalized, []);
+            }
+            dispositionDocsByNormalized.get(normalized).push(doc);
+        }
+
+        const contactsWithDisposition = plainContacts.map((contact, contactIndex) => {
+            const normalized = fallbackNormalize(contact?.phone || contact?.phoneNumber || '');
+            if (!normalized) {
+                return {
+                    ...contact,
+                    dispositionStatus: 'not_disposed',
+                    dispositionCount: 0,
+                    lastDispositionAt: null,
+                    lastLeadStatus: null,
+                    lastDispositionCategory: null,
+                    lastDispositionSubCategory: null
+                };
+            }
+
+            const docsForContact = dispositionDocsByNormalized.get(normalized) || [];
+            let filteredDocs = docsForContact;
+            const metaList = contactMetaByNormalized.get(normalized) || [];
+            const metaForContact = metaList.find(m => m.index === contactIndex);
+            const thresholdDate = metaForContact?.thresholdDate;
+
+            if (thresholdDate) {
+                filteredDocs = docsForContact.filter(doc => {
+                    const created = doc.createdAt instanceof Date ? doc.createdAt : new Date(doc.createdAt);
+                    return created >= thresholdDate;
+                });
+            }
+
+            const dispositionCount = filteredDocs.length;
+            const lastDoc = filteredDocs[0] || docsForContact[0] || null;
+            return {
+                ...contact,
+                dispositionStatus: dispositionCount > 0 ? 'disposed' : 'not_disposed',
+                dispositionCount,
+                lastDispositionAt: lastDoc?.createdAt || null,
+                lastLeadStatus: lastDoc?.leadStatus || null,
+                lastDispositionCategory: lastDoc?.category || null,
+                lastDispositionSubCategory: lastDoc?.subCategory || null
+            };
+        });
+
+        return res.json({ success: true, data: contactsWithDisposition });
     } catch (e) {
         console.error('Error fetching group contacts (human-agent):', e);
         return res.status(500).json({ success: false, error: 'Failed to fetch group contacts' });
