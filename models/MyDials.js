@@ -9,7 +9,6 @@ const MyDialSchema = new mongoose.Schema({
   humanAgentId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "humanAgent",
-    required: true,
   },
   category:{
     type: String,

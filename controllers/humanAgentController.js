@@ -831,126 +831,145 @@ exports.createGroup = async (req, res) => {
 		return res.status(500).json({ success: false, error: 'Failed to create group' });
 	}
 };
-
 exports.listGroups = async (req, res) => {
-	try {
-		const candidates = await getClientIdCandidates(req.user);
-		const ownerType = req.user.userType === 'humanAgent' ? 'humanAgent' : 'client';
-		const ownerId = new (require('mongoose')).Types.ObjectId(String(req.user.id));
-        const ownerParam = String(req.query.owner || '').toLowerCase();
+  try {
+    const candidates = await getClientIdCandidates(req.user);
+    const ownerType = req.user.userType === "humanAgent" ? "humanAgent" : "client";
+    const ownerId = new (require('mongoose')).Types.ObjectId(String(req.user.id));
+    const ownerParam = String(req.query.owner || "").toLowerCase();
 
-		// Build pipeline conditionally when filtering only assigned items
-		const pipeline = [];
-		if (ownerParam === 'assign') {
-			pipeline.push({
-				$match: {
-					clientId: { $in: candidates },
-					$or: [
-						{ assignedHumanAgents: ownerId },
-						{ 'contacts.assignedToHumanAgents.humanAgentId': ownerId }
-					]
-				}
-			});
-			// derive assigned contacts for count
-			pipeline.push({
-				$addFields: {
-					__assignedContacts: {
-						$filter: {
-							input: { $ifNull: [ '$contacts', [] ] },
-							as: 'c',
-							cond: {
-								$in: [ ownerId, {
-									$map: {
-										input: { $ifNull: [ '$$c.assignedToHumanAgents', [] ] },
-										as: 'a',
-										in: '$$a.humanAgentId'
-									}
-								} ]
-							}
-						}
-					}
-				}
-			});
-		} else {
-			// Default view: Show only groups created by the user
-			pipeline.push({
-				$match: {
-					clientId: { $in: candidates },
-					ownerType,
-					ownerId
-				}
-			});
-		}
-		pipeline.push(
-			{ $sort: { createdAt: -1 } },
-			{
-				$lookup: {
-					from: 'humanagents',
-					localField: 'assignedHumanAgents',
-					foreignField: '_id',
-					as: 'assignedHumanAgentsData'
-				}
-			},
-			{
-				$lookup: {
-					from: 'humanagents',
-					localField: 'ownerId',
-					foreignField: '_id',
-					as: 'ownerData'
-				}
-			},
-			{
-				$project: {
-					name: 1,
-					category: 1,
-					description: 1,
-					clientId: 1,
-					ownerType: 1,
-					ownerId: 1,
-					assignedHumanAgents: 1,
-					assignedHumanAgentsData: {
-						$map: {
-							input: '$assignedHumanAgentsData',
-							as: 'agent',
-							in: {
-								_id: '$$agent._id',
-								humanAgentName: '$$agent.humanAgentName',
-								email: '$$agent.email',
-								role: '$$agent.role'
-							}
-						}
-					},
-					ownerData: {
-						$map: {
-							input: '$ownerData',
-							as: 'owner',
-							in: {
-								_id: '$$owner._id',
-								humanAgentName: '$$owner.humanAgentName',
-								email: '$$owner.email',
-								role: '$$owner.role'
-							}
-						}
-					},
-					createdAt: 1,
-					updatedAt: 1,
-					contactsCount: ownerParam === 'assign'
-						? { $size: { $ifNull: [ '$__assignedContacts', [] ] } }
-						: { $size: { $ifNull: [ '$contacts', [] ] } },
-					assignedContactsCount: ownerParam === 'assign'
-						? { $size: { $ifNull: [ '$__assignedContacts', [] ] } }
-						: { $literal: undefined }
-				}
-			}
-		);
+    // Accept all 3 filter params for robust filtering
+    const { filter, startDate, endDate } = req.query;
 
-		const groups = await Group.aggregate(pipeline);
-		return res.json({ success: true, data: groups });
-	} catch (e) {
-		console.error('Error fetching groups (human-agent):', e);
-		return res.status(500).json({ success: false, error: 'Failed to fetch groups' });
-	}
+    // Validate filter params using your existing utility
+    const validation = validateFilter(filter, startDate, endDate);
+    if (validation) return res.status(400).json(validation);
+
+    // Build date filter condition using your existing utility
+    const dateFilter = buildDateFilter(filter, startDate, endDate);
+
+    const pipeline = [];
+
+    if (ownerParam === "assign") {
+      pipeline.push({
+        $match: {
+          clientId: { $in: candidates },
+          $or: [
+            { assignedHumanAgents: ownerId },
+            { "contacts.assignedToHumanAgents.humanAgentId": ownerId },
+          ],
+          ...dateFilter, // apply date filter inside $match
+        },
+      });
+      pipeline.push({
+        $addFields: {
+          __assignedContacts: {
+            $filter: {
+              input: { $ifNull: ["$contacts", []] },
+              as: "c",
+              cond: {
+                $in: [
+                  ownerId,
+                  {
+                    $map: {
+                      input: { $ifNull: ["$$c.assignedToHumanAgents", []] },
+                      as: "a",
+                      in: "$$a.humanAgentId",
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        },
+      });
+    } else {
+      pipeline.push({
+        $match: {
+          clientId: { $in: candidates },
+          ownerType,
+          ownerId,
+          ...dateFilter, // apply date filter for owned groups as well
+        },
+      });
+    }
+
+    // Continue with your existing pipeline stages here (sort, lookups, project)
+
+    pipeline.push(
+      { $sort: { createdAt: -1 } },
+      {
+        $lookup: {
+          from: "humanagents",
+          localField: "assignedHumanAgents",
+          foreignField: "_id",
+          as: "assignedHumanAgentsData",
+        },
+      },
+      {
+        $lookup: {
+          from: "humanagents",
+          localField: "ownerId",
+          foreignField: "_id",
+          as: "ownerData",
+        },
+      },
+      {
+        $project: {
+          name: 1,
+          category: 1,
+          description: 1,
+          clientId: 1,
+          ownerType: 1,
+          ownerId: 1,
+          assignedHumanAgents: 1,
+          assignedHumanAgentsData: {
+            $map: {
+              input: "$assignedHumanAgentsData",
+              as: "agent",
+              in: {
+                _id: "$$agent._id",
+                humanAgentName: "$$agent.humanAgentName",
+                email: "$$agent.email",
+                role: "$$agent.role",
+              },
+            },
+          },
+          ownerData: {
+            $map: {
+              input: "$ownerData",
+              as: "owner",
+              in: {
+                _id: "$$owner._id",
+                humanAgentName: "$$owner.humanAgentName",
+                email: "$$owner.email",
+                role: "$$owner.role",
+              },
+            },
+          },
+          createdAt: 1,
+          updatedAt: 1,
+          contactsCount:
+            ownerParam === "assign"
+              ? { $size: { $ifNull: ["$__assignedContacts", []] } }
+              : { $size: { $ifNull: ["$contacts", []] } },
+          assignedContactsCount:
+            ownerParam === "assign"
+              ? { $size: { $ifNull: ["$__assignedContacts", []] } }
+              : { $literal: undefined },
+        },
+      }
+    );
+
+    const groups = await Group.aggregate(pipeline);
+    return res.json({ success: true, data: groups, filter: { applied: filter || "all", startDate, endDate } });
+  } catch (e) {
+    console.error("Error fetching groups (human-agent):", e);
+    return res.status(500).json({ success: false, error: "Failed to fetch groups" });
+  }
 };
+
+  
 
 exports.updateGroup = async (req, res) => {
 	try {
