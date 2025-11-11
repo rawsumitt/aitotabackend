@@ -59,6 +59,13 @@ function validateProfileData(data) {
 // Create a new profile
 exports.createProfile = async (req, res) => {
   try {
+    // Log the incoming request body for debugging
+    console.log('=== createProfile API - Request Body ===');
+    console.log('Full request body:', JSON.stringify(req.body, null, 2));
+    console.log('Request body keys:', Object.keys(req.body || {}));
+    console.log('Request body values:', Object.values(req.body || {}));
+    console.log('========================================');
+    
     // Validate request body
     if (!req.body || Object.keys(req.body).length === 0) {
       return res.status(400).json({
@@ -73,16 +80,22 @@ exports.createProfile = async (req, res) => {
     if (req.body.humanAgentId) {
       // Only require minimal fields for human agent profile
       const minimalFields = ['businessName', 'contactNumber', 'role', 'contactName', 'humanAgentId'];
+      console.log('Validating minimal fields for human agent profile');
       for (const f of minimalFields) {
         if (!req.body[f] || String(req.body[f]).trim().length === 0) {
           validationErrors.push(`${f} is required`);
+          console.log(`Validation error: ${f} is missing or empty. Value received:`, req.body[f]);
         }
       }
     } else {
       // Validate full profile data for client
+      console.log('Validating full profile data for client');
       validationErrors = validateProfileData(req.body);
     }
     if (validationErrors.length > 0) {
+      console.log('=== Validation Errors ===');
+      console.log('Validation errors:', validationErrors);
+      console.log('=========================');
       return res.status(400).json({
         success: false,
         message: 'Validation failed',
