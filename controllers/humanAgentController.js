@@ -865,6 +865,9 @@ exports.listGroups = async (req, res) => {
       });
       pipeline.push({
         $addFields: {
+          __isGroupAssigned: {
+            $in: [ownerId, { $ifNull: ["$assignedHumanAgents", []] }],
+          },
           __assignedContacts: {
             $filter: {
               input: { $ifNull: ["$contacts", []] },
@@ -953,11 +956,23 @@ exports.listGroups = async (req, res) => {
           updatedAt: 1,
           contactsCount:
             ownerParam === "assign"
-              ? { $size: { $ifNull: ["$__assignedContacts", []] } }
+              ? {
+                  $cond: {
+                    if: "$__isGroupAssigned",
+                    then: { $size: { $ifNull: ["$contacts", []] } },
+                    else: { $size: { $ifNull: ["$__assignedContacts", []] } },
+                  },
+                }
               : { $size: { $ifNull: ["$contacts", []] } },
           assignedContactsCount:
             ownerParam === "assign"
-              ? { $size: { $ifNull: ["$__assignedContacts", []] } }
+              ? {
+                  $cond: {
+                    if: "$__isGroupAssigned",
+                    then: { $size: { $ifNull: ["$contacts", []] } },
+                    else: { $size: { $ifNull: ["$__assignedContacts", []] } },
+                  },
+                }
               : { $literal: undefined },
         },
       }
@@ -969,9 +984,7 @@ exports.listGroups = async (req, res) => {
     console.error("Error fetching groups (human-agent):", e);
     return res.status(500).json({ success: false, error: "Failed to fetch groups" });
   }
-};
-
-  
+}; 
 
 exports.updateGroup = async (req, res) => {
 	try {
