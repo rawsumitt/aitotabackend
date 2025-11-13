@@ -5659,7 +5659,7 @@ router.delete('/business/:id', extractClientId, async (req, res) => {
 router.post('/dials', extractClientId, async(req,res)=>{
   try{
     const clientId = req.clientId;
-    const {category, subCategory, phoneNumber, leadStatus ,contactName, date, other, duration} = req.body;
+    const {category, subCategory, phoneNumber, leadStatus ,contactName, date, other, duration, explanation} = req.body;
 
     if(!category || !phoneNumber ){
       return res.status(400).json({success: false, message: "Missing required fields. Required: category, phoneNumber"});
@@ -5674,7 +5674,8 @@ router.post('/dials', extractClientId, async(req,res)=>{
       contactName: contactName || "",
       date,
       other,
-      duration: duration || 0
+      duration: duration || 0,
+      explanation: explanation || ""
     });
     res.status(201).json({success: true, data: dial});
 

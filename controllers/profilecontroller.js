@@ -3,18 +3,30 @@ const Client = require('../models/Client');
 const HumanAgent = require('../models/HumanAgent');
 const { getobject } = require('../utils/s3');
 
+// Helper to construct address from city, state, pincode
+function constructAddress(data) {
+  const addressParts = [];
+  if (data.city) addressParts.push(data.city);
+  if (data.state) addressParts.push(data.state);
+  if (data.pincode) addressParts.push(data.pincode);
+  return addressParts.length > 0 ? addressParts.join(', ') : (data.address || '');
+}
+
 // Helper to check if all required fields are filled
 function checkProfileCompleted(profile) {
+  // Construct address from city, state, pincode if address is not directly provided
+  const address = profile.address || constructAddress(profile);
+  
   return !!(
     profile.businessName &&
     profile.businessType &&
     profile.contactNumber &&
     profile.contactName &&
-    profile.address &&
+    address &&
     profile.website &&
     profile.pancard &&
-    profile.gst &&
     profile.annualTurnover
+    // gst is now optional, so removed from check
   );
 }
 
@@ -26,10 +38,8 @@ function validateProfileData(data) {
     'businessType',
     'contactNumber',
     'contactName',
-    'address',
     'website',
     'pancard',
-    'gst',
     'annualTurnover'
   ];
 
@@ -39,16 +49,18 @@ function validateProfileData(data) {
     }
   }
 
+  // Check if address can be constructed from city, state, pincode or if address is provided
+  const constructedAddress = constructAddress(data);
+  if (!constructedAddress || constructedAddress.trim().length === 0) {
+    errors.push('address is required (provide city, state, pincode, or address field)');
+  }
+
   // Light format checks
   if (data.website && !/^https?:\/\//i.test(data.website)) {
     errors.push('website must start with http:// or https://');
   }
-  if (data.pancard && !/^[A-Z]{5}[0-9]{4}[A-Z]{1}$/i.test(String(data.pancard))) {
-    errors.push('pancard appears invalid');
-  }
-  if (data.gst && !/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/i.test(String(data.gst))) {
-    errors.push('gst appears invalid');
-  }
+  // Removed pancard format validation - accepting any pancard value
+  // Removed gst format validation - gst is now optional
   if (data.contactNumber && String(data.contactNumber).replace(/\D/g, '').length < 10) {
     errors.push('contactNumber appears invalid');
   }
@@ -59,6 +71,13 @@ function validateProfileData(data) {
 // Create a new profile
 exports.createProfile = async (req, res) => {
   try {
+    // Log the incoming request body for debugging
+    console.log('=== createProfile API - Request Body ===');
+    console.log('Full request body:', JSON.stringify(req.body, null, 2));
+    console.log('Request body keys:', Object.keys(req.body || {}));
+    console.log('Request body values:', Object.values(req.body || {}));
+    console.log('========================================');
+    
     // Validate request body
     if (!req.body || Object.keys(req.body).length === 0) {
       return res.status(400).json({
@@ -73,16 +92,22 @@ exports.createProfile = async (req, res) => {
     if (req.body.humanAgentId) {
       // Only require minimal fields for human agent profile
       const minimalFields = ['businessName', 'contactNumber', 'role', 'contactName', 'humanAgentId'];
+      console.log('Validating minimal fields for human agent profile');
       for (const f of minimalFields) {
         if (!req.body[f] || String(req.body[f]).trim().length === 0) {
           validationErrors.push(`${f} is required`);
+          console.log(`Validation error: ${f} is missing or empty. Value received:`, req.body[f]);
         }
       }
     } else {
       // Validate full profile data for client
+      console.log('Validating full profile data for client');
       validationErrors = validateProfileData(req.body);
     }
     if (validationErrors.length > 0) {
+      console.log('=== Validation Errors ===');
+      console.log('Validation errors:', validationErrors);
+      console.log('=========================');
       return res.status(400).json({
         success: false,
         message: 'Validation failed',
@@ -120,6 +145,12 @@ exports.createProfile = async (req, res) => {
       ...req.body,
       clientId: req.body.humanAgentId ? undefined : req.client._id // Only set clientId if not human agent
     };
+
+    // Construct address from city, state, pincode if address is not directly provided
+    if (!profileData.address && (profileData.city || profileData.state || profileData.pincode)) {
+      profileData.address = constructAddress(profileData);
+      console.log('Constructed address from city, state, pincode:', profileData.address);
+    }
 
     // Check if all fields are filled
     profileData.isProfileCompleted = checkProfileCompleted(profileData);
@@ -418,6 +449,11 @@ exports.updateProfile = async (req, res) => {
     const updateData = { ...req.body };
     delete updateData.clientId;
     delete updateData.humanAgentId;
+
+    // Construct address from city, state, pincode if address is not directly provided
+    if (!updateData.address && (updateData.city || updateData.state || updateData.pincode)) {
+      updateData.address = constructAddress(updateData);
+    }
 
     // Find the current profile
     const profile = await Profile.findById(req.params.profileId);

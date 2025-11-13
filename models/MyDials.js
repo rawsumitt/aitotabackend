@@ -54,6 +54,9 @@ const MyDialSchema = new mongoose.Schema({
   duration:{
     type: Number,
     default: 0
+  },
+  explanation:{
+    type: String,
   }
 },{
     timestamps: true
