@@ -57,6 +57,18 @@ const MyDialSchema = new mongoose.Schema({
   },
   explanation:{
     type: String,
+  },
+  profession:{
+    type: String, 
+  },
+  gender:{
+    type: String,
+  },
+  pincode:{
+    type: String,
+  },
+  city:{
+    type: String,
   }
 },{
     timestamps: true
