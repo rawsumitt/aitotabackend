@@ -4,7 +4,7 @@ const MyDials = require('../models/MyDials');
 exports.addDial = async (req, res) => { 
 	try {
 		const humanAgentId = req.user.id;
-		const { category,subCategory, explanation, duration, phoneNumber, leadStatus, contactName, date,gender, profession, pincode, city, other } = req.body;
+		const { category,subCategory, explanation, duration, phoneNumber, leadStatus, contactName, date,gender, profession, pincode, city, age, other } = req.body;
 		if (!category || !phoneNumber) {
 			return res.status(400).json({ success: false, message: "Missing required fields. Required: category, phoneNumber" });
 		}
@@ -18,6 +18,7 @@ exports.addDial = async (req, res) => {
 			duration,
 			phoneNumber,
 			contactName: contactName || "",
+			age,
 			date,
 			gender,
 			profession,

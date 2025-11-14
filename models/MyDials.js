@@ -48,6 +48,10 @@ const MyDialSchema = new mongoose.Schema({
     type: String,
     require: true
   },
+  age:{
+    type: Number,
+    default: 0
+  },
   date:{
     type: String,
   },
