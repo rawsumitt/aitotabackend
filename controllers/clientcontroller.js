@@ -81,9 +81,11 @@ const listApprovedProfilesForCurrentUser = async (req, res) => {
     for (const ha of humanAgents) {
       if (!ha.clientId) continue;
       const humanAgentLogoUrl = await resolveClientLogoUrl(ha.clientId);
+      const humanAgentName = ha.humanAgentName;
       profiles.push({
         role: 'humanAgent',
         id: ha._id,
+        name: humanAgentName,
         clientId: ha.clientId._id,
         clientUserId: ha.clientId.userId,
         clientName: ha.clientId.businessName || ha.clientId.name || ha.clientId.email,
@@ -372,6 +374,7 @@ const googleListApprovedProfiles = async (req, res) => {
         userType: 'humanAgent',
         id: ha._id,
         role: ha.role,
+        name:ha.humanAgentName,
         clientId: ha.clientId._id,
         clientUserId: ha.clientId.userId,
         clientName: ha.clientId.businessName || ha.clientId.name || ha.clientId.email,
