@@ -1074,6 +1074,52 @@ exports.getGroupsContacts = async (req, res) => {
             return res.json({ success: true, data: [] });
         }
 
+        const contactDemographicSources = (contact) => {
+            if (!contact) return [];
+            const baseSources = [
+                contact,
+                contact.details,
+                contact.additionalDetails,
+                contact.additionalInfo,
+                contact.metadata,
+                contact.meta,
+                contact.profile,
+                contact.contactDetails,
+                contact.extra,
+                contact.addressDetails
+            ];
+            return baseSources.filter(source => source && typeof source === 'object');
+        };
+
+        const resolveDemographicField = (contact, keys) => {
+            const sources = contactDemographicSources(contact);
+            for (const source of sources) {
+                for (const key of keys) {
+                    if (source[key] !== undefined && source[key] !== null && source[key] !== '') {
+                        return source[key];
+                    }
+                }
+            }
+            return null;
+        };
+
+        const enrichContactWithDemographics = (contact, payload) => {
+            const enriched = { ...payload };
+            const ensureField = (fieldName, keys) => {
+                if (enriched[fieldName] !== undefined) return;
+                const value = resolveDemographicField(contact, keys);
+                enriched[fieldName] = value !== undefined ? value : null;
+            };
+
+            ensureField('gender', ['gender', 'genderType']);
+            ensureField('age', ['age', 'years']);
+            ensureField('profession', ['profession', 'occupation', 'jobTitle', 'job']);
+            ensureField('pinCode', ['pinCode', 'pincode', 'zip', 'zipCode', 'postalCode']);
+            ensureField('city', ['city', 'town', 'locationCity', 'district']);
+
+            return enriched;
+        };
+
         const fallbackNormalize = MyDials.normalizePhoneNumber || ((phone) => {
             const digitsOnly = String(phone || '').replaceAll(/\D/g, '');
             if (digitsOnly.length > 10) {
@@ -1091,7 +1137,7 @@ exports.getGroupsContacts = async (req, res) => {
         }
 
         if (!normalizedPhonesSet.size) {
-            const contactsWithDisposition = plainContacts.map(contact => ({
+            const contactsWithDisposition = plainContacts.map(contact => enrichContactWithDemographics(contact, {
                 ...contact,
                 dispositionStatus: 'not_disposed',
                 dispositionCount: 0,
@@ -1228,7 +1274,7 @@ exports.getGroupsContacts = async (req, res) => {
         const contactsWithDisposition = plainContacts.map((contact, contactIndex) => {
             const normalized = fallbackNormalize(contact?.phone || contact?.phoneNumber || '');
             if (!normalized) {
-                return {
+                return enrichContactWithDemographics(contact, {
                     ...contact,
                     dispositionStatus: 'not_disposed',
                     dispositionCount: 0,
@@ -1236,7 +1282,7 @@ exports.getGroupsContacts = async (req, res) => {
                     lastLeadStatus: null,
                     lastDispositionCategory: null,
                     lastDispositionSubCategory: null
-                };
+                });
             }
 
             const docsForContact = dispositionDocsByNormalized.get(normalized) || [];
@@ -1254,7 +1300,7 @@ exports.getGroupsContacts = async (req, res) => {
 
             const dispositionCount = filteredDocs.length;
             const lastDoc = filteredDocs[0] || docsForContact[0] || null;
-            return {
+            return enrichContactWithDemographics(contact, {
                 ...contact,
                 dispositionStatus: dispositionCount > 0 ? 'disposed' : 'not_disposed',
                 dispositionCount,
@@ -1262,7 +1308,7 @@ exports.getGroupsContacts = async (req, res) => {
                 lastLeadStatus: lastDoc?.leadStatus || null,
                 lastDispositionCategory: lastDoc?.category || null,
                 lastDispositionSubCategory: lastDoc?.subCategory || null
-            };
+            });
         });
 
         return res.json({ success: true, data: contactsWithDisposition });

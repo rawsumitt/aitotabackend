@@ -19,6 +19,21 @@ const generateToken = (id) => {
   });
 };
 
+const resolveClientLogoUrl = async (clientDoc) => {
+  if (!clientDoc) return null;
+  if (clientDoc.businessLogoUrl) {
+    return clientDoc.businessLogoUrl;
+  }
+  if (clientDoc.businessLogoKey) {
+    try {
+      return await getobject(clientDoc.businessLogoKey);
+    } catch (error) {
+      console.warn('Failed to resolve client logo URL:', error?.message || error);
+    }
+  }
+  return null;
+};
+
 // Authenticated: list approved profiles for current token's email
 const listApprovedProfilesForCurrentUser = async (req, res) => {
   try {
@@ -46,6 +61,7 @@ const listApprovedProfilesForCurrentUser = async (req, res) => {
     // Client
     const client = await Client.findOne({ email, isApproved: true });
     if (client) {
+      const clientLogoUrl = await resolveClientLogoUrl(client);
       profiles.push({
         role: 'client',
         id: client._id,
@@ -53,7 +69,8 @@ const listApprovedProfilesForCurrentUser = async (req, res) => {
         name: client.name,
         email: client.email,
         isApproved: !!client.isApproved,
-        isprofileCompleted: !!client.isprofileCompleted
+        isprofileCompleted: !!client.isprofileCompleted,
+        logoUrl: clientLogoUrl
       });
     }
 
@@ -63,6 +80,7 @@ const listApprovedProfilesForCurrentUser = async (req, res) => {
     const humanAgents = await HumanAgent.find({ email, isApproved: true }).populate('clientId');
     for (const ha of humanAgents) {
       if (!ha.clientId) continue;
+      const humanAgentLogoUrl = await resolveClientLogoUrl(ha.clientId);
       profiles.push({
         role: 'humanAgent',
         id: ha._id,
@@ -71,7 +89,8 @@ const listApprovedProfilesForCurrentUser = async (req, res) => {
         clientName: ha.clientId.businessName || ha.clientId.name || ha.clientId.email,
         email: ha.email,
         isApproved: !!ha.isApproved,
-        isprofileCompleted: !!ha.isprofileCompleted
+        isprofileCompleted: !!ha.isprofileCompleted,
+        logoUrl: humanAgentLogoUrl
       });
     }
 
@@ -82,7 +101,8 @@ const listApprovedProfilesForCurrentUser = async (req, res) => {
         role: 'admin',
         id: admin._id,
         name: admin.name,
-        email: admin.email
+        email: admin.email,
+        logoUrl: null
       });
     }
 
@@ -130,6 +150,7 @@ const listApprovedProfilesForCurrentUser = async (req, res) => {
         isApproved: !!existing.isApproved,
         isprofileCompleted: !!existing.isprofileCompleted,
         profileId: profileId ? profileId._id : null,
+        businessLogoUrl: await resolveClientLogoUrl(existing),
         profiles: []
       });
     }
