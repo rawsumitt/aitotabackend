@@ -1133,8 +1133,6 @@ exports.listGroups = async (req, res) => {
           ...(typeof __isGroupAssigned === "boolean" ? { isGroupFullyAssigned: __isGroupAssigned } : {}),
           touchedCount: touchedContacts.length,
           untouchedCount: untouchedContacts.length,
-          touchedContacts,
-          untouchedContacts,
         };
       });
     }
@@ -1325,7 +1323,15 @@ exports.getGroupsContacts = async (req, res) => {
                 lastDispositionCategory: null,
                 lastDispositionSubCategory: null
             }));
-            return res.json({ success: true, data: contactsWithDisposition });
+            return res.json({
+                success: true,
+                data: {
+                    touchedContacts: [],
+                    untouchedContacts: contactsWithDisposition,
+                    touchedCount: 0,
+                    untouchedCount: contactsWithDisposition.length
+                }
+            });
         }
 
         const normalizedPhones = Array.from(normalizedPhonesSet);
@@ -1490,7 +1496,25 @@ exports.getGroupsContacts = async (req, res) => {
             });
         });
 
-        return res.json({ success: true, data: contactsWithDisposition });
+        const touchedContacts = [];
+        const untouchedContacts = [];
+        contactsWithDisposition.forEach(contact => {
+            if (contact.dispositionStatus === 'disposed') {
+                touchedContacts.push(contact);
+            } else {
+                untouchedContacts.push(contact);
+            }
+        });
+
+        return res.json({
+            success: true,
+            data: {
+                touchedContacts,
+                untouchedContacts,
+                touchedCount: touchedContacts.length,
+                untouchedCount: untouchedContacts.length
+            }
+        });
     } catch (e) {
         console.error('Error fetching group contacts (human-agent):', e);
         return res.status(500).json({ success: false, error: 'Failed to fetch group contacts' });
