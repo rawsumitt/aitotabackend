@@ -1212,6 +1212,48 @@ exports.getGroupsContacts = async (req, res) => {
         const ownerType = req.user.userType === 'humanAgent' ? 'humanAgent' : 'client';
         const ownerId = new mongoose.Types.ObjectId(String(req.user.id));
         const { id } = req.params; // group id
+        const parsePositiveInt = (value, defaultValue) => {
+            const parsed = parseInt(value, 10);
+            if (Number.isNaN(parsed) || parsed <= 0) return defaultValue;
+            return parsed;
+        };
+
+        const page = parsePositiveInt(req.query?.page, 1);
+        const limit = Math.min(parsePositiveInt(req.query?.limit, 50), 500);
+        const dispositionFilterRaw = String(req.query?.disposition || '').toLowerCase();
+        const dispositionFilter = ['touched', 'untouched', 'all'].includes(dispositionFilterRaw)
+            ? dispositionFilterRaw
+            : 'all';
+
+        const buildPaginatedResponse = (allContacts, touchedContactsList, untouchedContactsList) => {
+            let baseList = allContacts;
+            if (dispositionFilter === 'touched') {
+                baseList = touchedContactsList;
+            } else if (dispositionFilter === 'untouched') {
+                baseList = untouchedContactsList;
+            }
+
+            const totalContacts = baseList.length;
+            const totalPages = Math.max(1, Math.ceil(totalContacts / limit));
+            const currentPage = Math.min(page, totalPages);
+            const startIndex = (currentPage - 1) * limit;
+            const paginatedContacts = baseList.slice(startIndex, startIndex + limit);
+
+            return {
+                contacts: paginatedContacts,
+                pagination: {
+                    page: currentPage,
+                    limit,
+                    totalPages,
+                    totalContacts
+                },
+                filters: {
+                    disposition: dispositionFilter
+                },
+                touchedCount: touchedContactsList.length,
+                untouchedCount: untouchedContactsList.length
+            };
+        };
 
         const group = await Group.findOne({
             _id: id,
@@ -1323,14 +1365,14 @@ exports.getGroupsContacts = async (req, res) => {
                 lastDispositionCategory: null,
                 lastDispositionSubCategory: null
             }));
+            const paginatedData = buildPaginatedResponse(
+                contactsWithDisposition,
+                [],
+                contactsWithDisposition
+            );
             return res.json({
                 success: true,
-                data: {
-                    touchedContacts: [],
-                    untouchedContacts: contactsWithDisposition,
-                    touchedCount: 0,
-                    untouchedCount: contactsWithDisposition.length
-                }
+                data: paginatedData
             });
         }
 
@@ -1506,14 +1548,14 @@ exports.getGroupsContacts = async (req, res) => {
             }
         });
 
+        const paginatedData = buildPaginatedResponse(
+            contactsWithDisposition,
+            touchedContacts,
+            untouchedContacts
+        );
         return res.json({
             success: true,
-            data: {
-                touchedContacts,
-                untouchedContacts,
-                touchedCount: touchedContacts.length,
-                untouchedCount: untouchedContacts.length
-            }
+            data: paginatedData
         });
     } catch (e) {
         console.error('Error fetching group contacts (human-agent):', e);
