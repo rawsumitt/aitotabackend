@@ -2483,7 +2483,7 @@ router.post('/groups/:groupId/assign', extractClientId, async (req, res) => {
       }
       
       // Use bulkWrite with positional operator to update each contact atomically
-      // Filter ensures we only update if not already assigned
+      // Handle both new assignments and reassignments (update assignedAt timestamp)
       let updatedCount = 0;
       const updateOps = [];
       
@@ -2495,7 +2495,30 @@ router.post('/groups/:groupId/assign', extractClientId, async (req, res) => {
           
           if (!contactObjId) continue;
           
-          // Only add assignment if not already present
+          // First, try to update existing assignment (reassignment)
+          updateOps.push({
+            updateOne: {
+              filter: {
+                _id: groupId,
+                clientId: req.clientId,
+                contacts: {
+                  $elemMatch: {
+                    _id: contactObjId,
+                    'assignedToHumanAgents.humanAgentId': humanAgentObjectId
+                  }
+                }
+              },
+              update: {
+                $set: {
+                  'contacts.$.assignedToHumanAgents.$[elem].assignedAt': new Date(),
+                  'contacts.$.assignedToHumanAgents.$[elem].assignedBy': clientObjectId
+                }
+              },
+              arrayFilters: [{ 'elem.humanAgentId': humanAgentObjectId }]
+            }
+          });
+          
+          // Also add assignment if not already present (new assignment)
           updateOps.push({
             updateOne: {
               filter: {
@@ -2522,7 +2545,10 @@ router.post('/groups/:groupId/assign', extractClientId, async (req, res) => {
       
       if (updateOps.length > 0) {
         const bulkResult = await Group.bulkWrite(updateOps, { ordered: false });
+        // Count both new assignments and reassignments
         updatedCount = bulkResult.modifiedCount || 0;
+        // Note: We can't easily distinguish between new and reassigned in bulkWrite,
+        // so we'll count all modifications as updates
       }
       
       // Fetch updated group to get assigned contacts
@@ -2557,7 +2583,7 @@ router.post('/groups/:groupId/assign', extractClientId, async (req, res) => {
       // Return group data + assigned contacts (simple response)
       res.json({
         success: true,
-        message: `Successfully assigned ${updatedCount} contact(s) to human agent`,
+        message: `Successfully ${updatedCount > 0 ? 'assigned/reassigned' : 'processed'} ${updatedCount} contact(s) to human agent`,
         data: {
           group: {
             _id: group._id,
