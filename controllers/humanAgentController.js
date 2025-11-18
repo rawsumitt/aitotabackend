@@ -1915,6 +1915,109 @@ exports.getHumanAgentsForAssignment = async (req, res) => {
 // Export helper function
 module.exports.resolveClientUserId = resolveClientUserId;
 
+// Aggregate basic assignment/disposition stats for a human agent
+exports.getAgentDispositionStats = async (req, res) => {
+	try {
+		const mongoose = require('mongoose');
+		const { humanAgentId: humanAgentIdParam } = req.query;
+		const isHumanAgent = req.user.userType === 'humanAgent';
+		const targetHumanAgentId = isHumanAgent ? req.user.id : humanAgentIdParam;
+
+		if (!targetHumanAgentId || !mongoose.Types.ObjectId.isValid(String(targetHumanAgentId))) {
+			return res.status(400).json({ success: false, error: 'Valid humanAgentId is required' });
+		}
+
+		const humanAgentObjectId = new mongoose.Types.ObjectId(String(targetHumanAgentId));
+
+		if (!isHumanAgent) {
+			const HumanAgent = require('../models/HumanAgent');
+			const agentDoc = await HumanAgent.findById(humanAgentObjectId).select('clientId').lean();
+			if (!agentDoc) {
+				return res.status(404).json({ success: false, error: 'Human agent not found' });
+			}
+			const requesterClientId = req.user.clientId ? String(req.user.clientId) : null;
+			if (requesterClientId && String(agentDoc.clientId) !== requesterClientId) {
+				return res.status(403).json({ success: false, error: 'Not authorized to view this human agent' });
+			}
+		}
+
+		const clientCandidates = (await getClientIdCandidates(req.user)).filter(Boolean);
+		const groupMatch = {
+			'contacts.assignedToHumanAgents.humanAgentId': humanAgentObjectId
+		};
+		if (clientCandidates.length) {
+			groupMatch.clientId = { $in: clientCandidates };
+		}
+
+		const groupAggregation = await Group.aggregate([
+			{ $match: groupMatch },
+			{ $project: { contacts: 1 } },
+			{ $unwind: '$contacts' },
+			{ $match: { 'contacts.assignedToHumanAgents.humanAgentId': humanAgentObjectId } },
+			{ $group: { _id: null, assignedContacts: { $sum: 1 }, groups: { $addToSet: '$_id' } } },
+			{ $project: { _id: 0, assignedContacts: 1, groupCount: { $size: '$groups' } } }
+		]);
+
+		const assignedCount = groupAggregation[0]?.assignedContacts || 0;
+		const assignedGroupCount = groupAggregation[0]?.groupCount || 0;
+
+		const normalizedClientId = req.user.clientId && mongoose.Types.ObjectId.isValid(String(req.user.clientId))
+			? new mongoose.Types.ObjectId(String(req.user.clientId))
+			: null;
+
+		const dialMatch = { humanAgentId: humanAgentObjectId };
+		if (normalizedClientId) {
+			dialMatch.clientId = normalizedClientId;
+		}
+
+		const updatedByAgent = await MyDials.countDocuments(dialMatch);
+		const today = new Date();
+		const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+		const updatedToday = await MyDials.countDocuments({
+			...dialMatch,
+			createdAt: { $gte: startOfToday }
+		});
+
+		const normalizedPhones = await MyDials.distinct('normalizedPhoneNumber', dialMatch);
+		const touchedContacts = normalizedPhones.filter(Boolean).length;
+		const pendingContacts = Math.max(assignedCount - touchedContacts, 0);
+
+		const breakdownDocs = await MyDials.aggregate([
+			{ $match: dialMatch },
+			{ $group: { _id: '$leadStatus', count: { $sum: 1 } } }
+		]);
+		const dispositionBreakdown = breakdownDocs.reduce((acc, doc) => {
+			const key = doc._id || 'unknown';
+			acc[key] = doc.count;
+			return acc;
+		}, {});
+
+		const lastDisposition = await MyDials.findOne(dialMatch)
+			.sort({ createdAt: -1 })
+			.select('createdAt leadStatus category subCategory')
+			.lean();
+
+		return res.json({
+			success: true,
+			data: {
+				humanAgentId: String(humanAgentObjectId),
+				assignedCount,
+				assignedGroupCount,
+				updatedByAgent,
+				updatedToday,
+				touchedContacts,
+				pendingContacts,
+				dispositionBreakdown,
+				lastDispositionAt: lastDisposition?.createdAt || null,
+				lastDispositionStatus: lastDisposition?.leadStatus || null
+			}
+		});
+	} catch (error) {
+		console.error('Error fetching agent disposition stats:', error);
+		return res.status(500).json({ success: false, error: 'Failed to fetch agent disposition stats' });
+	}
+};
+
 
 // Get campaigns with assigned contacts summary for human agent
 exports.getAssignedCampaigns = async (req, res) => {
