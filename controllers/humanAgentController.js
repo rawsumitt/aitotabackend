@@ -880,6 +880,7 @@ exports.listGroups = async (req, res) => {
     const candidates = await getClientIdCandidates(req.user);
     const ownerType = req.user.userType === "humanAgent" ? "humanAgent" : "client";
     const ownerId = new (require('mongoose')).Types.ObjectId(String(req.user.id));
+    const ownerIdStr = String(ownerId);
     const ownerParam = String(req.query.owner || "").toLowerCase();
 
     // Accept all 3 filter params for robust filtering
@@ -929,6 +930,17 @@ exports.listGroups = async (req, res) => {
             },
           },
         },
+      });
+      pipeline.push({
+        $addFields: {
+          contactsForAgent: {
+            $cond: [
+              "$__isGroupAssigned",
+              { $ifNull: ["$contacts", []] },
+              { $ifNull: ["$__assignedContacts", []] }
+            ]
+          }
+        }
       });
     } else {
       pipeline.push({
@@ -1016,12 +1028,122 @@ exports.listGroups = async (req, res) => {
                   },
                 }
               : { $literal: undefined },
+          contactsForAgent: ownerParam === "assign" ? "$contactsForAgent" : "$$REMOVE",
+          __isGroupAssigned: ownerParam === "assign" ? "$__isGroupAssigned" : "$$REMOVE"
         },
       }
     );
 
     const groups = await Group.aggregate(pipeline);
-    return res.json({ success: true, data: groups, filter: { applied: filter || "all", startDate, endDate } });
+    let responseData = groups;
+
+    if (ownerParam === "assign" && groups.length) {
+      const fallbackNormalize =
+        (MyDials && typeof MyDials.normalizePhoneNumber === "function"
+          ? MyDials.normalizePhoneNumber.bind(MyDials)
+          : (phone) => {
+              const digitsOnly = String(phone || "").replace(/\D/g, "");
+              if (digitsOnly.length > 10) {
+                return digitsOnly.slice(-10);
+              }
+              return digitsOnly;
+            });
+
+      const normalizedSet = new Set();
+
+      groups.forEach((group, groupIndex) => {
+        const contacts = Array.isArray(group.contactsForAgent)
+          ? group.contactsForAgent
+          : [];
+        contacts.forEach((contact) => {
+          const normalized = fallbackNormalize(contact?.phone || contact?.phoneNumber || "");
+          if (!normalized) return;
+          normalizedSet.add(normalized);
+        });
+      });
+
+      let touchedDocsByPhone = new Map();
+      if (normalizedSet.size) {
+        const touchedDocs = await MyDials.find({
+          humanAgentId: ownerId,
+          normalizedPhoneNumber: { $in: Array.from(normalizedSet) },
+        })
+          .sort({ updatedAt: -1 })
+          .select("normalizedPhoneNumber leadStatus category subCategory updatedAt createdAt contactName phoneNumber")
+          .lean();
+        touchedDocsByPhone = touchedDocs.reduce((map, doc) => {
+          if (!doc?.normalizedPhoneNumber) return map;
+          if (!map.has(doc.normalizedPhoneNumber)) {
+            map.set(doc.normalizedPhoneNumber, doc);
+          }
+          return map;
+        }, new Map());
+      }
+
+      responseData = groups.map((group) => {
+        const { contactsForAgent, __isGroupAssigned, ...groupRest } = group;
+        const contacts = Array.isArray(contactsForAgent)
+          ? contactsForAgent
+          : [];
+        const touchedContacts = [];
+        const untouchedContacts = [];
+
+        contacts.forEach((contact) => {
+          const normalized = fallbackNormalize(contact?.phone || contact?.phoneNumber || "");
+          if (!normalized) {
+            untouchedContacts.push({
+              _id: contact?._id,
+              name: contact?.name || "",
+              phone: contact?.phone || contact?.phoneNumber || "",
+              email: contact?.email || "",
+              assignedAt: contact?.assignedAt || undefined,
+            });
+            return;
+          }
+          const doc = touchedDocsByPhone.get(normalized);
+          const assignmentInfo = Array.isArray(contact?.assignedToHumanAgents)
+            ? contact.assignedToHumanAgents.find(
+                (entry) => String(entry?.humanAgentId) === ownerIdStr
+              )
+            : undefined;
+          const contactPayload = {
+            _id: contact?._id,
+            name: contact?.name || contact?.contactName || "",
+            phone: contact?.phone || contact?.phoneNumber || "",
+            email: contact?.email || "",
+            assignedAt: assignmentInfo?.assignedAt || contact?.assignedAt || undefined,
+            assignedBy: assignmentInfo?.assignedBy || contact?.assignedBy || undefined,
+          };
+
+          if (doc) {
+            touchedContacts.push({
+              ...contactPayload,
+              lastLeadStatus: doc.leadStatus || null,
+              lastDispositionCategory: doc.category || null,
+              lastDispositionSubCategory: doc.subCategory || null,
+              lastDispositionAt: doc.updatedAt || doc.createdAt || null,
+            });
+          } else {
+            untouchedContacts.push(contactPayload);
+          }
+        });
+
+        return {
+          ...groupRest,
+          ...(typeof __isGroupAssigned === "boolean" ? { isGroupFullyAssigned: __isGroupAssigned } : {}),
+          touchedCount: touchedContacts.length,
+          untouchedCount: untouchedContacts.length,
+          touchedContacts,
+          untouchedContacts,
+        };
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: responseData,
+      filter: { applied: filter || "all", startDate, endDate },
+    });
   } catch (e) {
     console.error("Error fetching groups (human-agent):", e);
     return res.status(500).json({ success: false, error: "Failed to fetch groups" });
