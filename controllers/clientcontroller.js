@@ -21,15 +21,15 @@ const generateToken = (id) => {
 
 const resolveClientLogoUrl = async (clientDoc) => {
   if (!clientDoc) return null;
-  if (clientDoc.businessLogoUrl) {
-    return clientDoc.businessLogoUrl;
-  }
   if (clientDoc.businessLogoKey) {
     try {
       return await getobject(clientDoc.businessLogoKey);
     } catch (error) {
-      console.warn('Failed to resolve client logo URL:', error?.message || error);
+      console.warn('Failed to resolve client logo URL via S3 key:', error?.message || error);
     }
+  }
+  if (clientDoc.businessLogoUrl) {
+    return clientDoc.businessLogoUrl;
   }
   return null;
 };
@@ -355,6 +355,7 @@ const googleListApprovedProfiles = async (req, res) => {
     // Approved client profile (same email)
     const client = await Client.findOne({ email, isApproved: true });
     if (client) {
+      const clientLogoUrl = await resolveClientLogoUrl(client);
       profiles.push({
         userType: 'client',
         id: client._id,
@@ -362,7 +363,8 @@ const googleListApprovedProfiles = async (req, res) => {
         name: client.name,
         email: client.email,
         isApproved: !!client.isApproved,
-        isprofileCompleted: !!client.isprofileCompleted
+        isprofileCompleted: !!client.isprofileCompleted,
+        logoUrl: clientLogoUrl
       });
     }
 
@@ -370,6 +372,7 @@ const googleListApprovedProfiles = async (req, res) => {
     const humanAgents = await HumanAgent.find({ email, isApproved: true }).populate('clientId');
     for (const ha of humanAgents) {
       if (!ha.clientId) continue;
+      const humanAgentLogoUrl = await resolveClientLogoUrl(ha.clientId);
       profiles.push({
         userType: 'humanAgent',
         id: ha._id,
@@ -380,7 +383,8 @@ const googleListApprovedProfiles = async (req, res) => {
         clientName: ha.clientId.businessName || ha.clientId.name || ha.clientId.email,
         email: ha.email,
         isApproved: !!ha.isApproved,
-        isprofileCompleted: !!ha.isprofileCompleted
+        isprofileCompleted: !!ha.isprofileCompleted,
+        logoUrl: humanAgentLogoUrl
       });
     }
 
@@ -427,6 +431,7 @@ const googleListApprovedProfiles = async (req, res) => {
 
       const token = jwt.sign({ id: client._id, email: client.email, userType: 'client' }, process.env.JWT_SECRET, { expiresIn: '7d' });
       const profileId = await Profile.findOne({ clientId: client._id });
+      const clientLogoUrl = await resolveClientLogoUrl(client);
 
       // Initialize tokens object for client
       const tokens = {
@@ -450,6 +455,7 @@ const googleListApprovedProfiles = async (req, res) => {
         isApproved: !!client.isApproved,
         isprofileCompleted: !!client.isprofileCompleted,
         profileId: profileId ? profileId._id : null,
+        logoUrl: clientLogoUrl,
         profiles: []
       });
     }
@@ -464,6 +470,7 @@ const googleListApprovedProfiles = async (req, res) => {
           const adminId = sameEmailAdmin ? String(sameEmailAdmin._id) : undefined;
           const token = jwt.sign({ id: client._id, email: client.email, userType: 'client', adminAccess, adminId }, process.env.JWT_SECRET, { expiresIn: '7d' });
           const profileId = await Profile.findOne({ clientId: client._id });
+          const clientLogoUrl = await resolveClientLogoUrl(client);
 
           // Initialize tokens object for client
           const tokens = {
@@ -487,7 +494,8 @@ const googleListApprovedProfiles = async (req, res) => {
                         adminAccess, adminId,
                        isApproved: !!client.isApproved,
                         isprofileCompleted: !!client.isprofileCompleted,
-                       profileId: profileId ? profileId._id : null
+                       profileId: profileId ? profileId._id : null,
+                       logoUrl: clientLogoUrl
                       });
         }
       } else if (only.userType === 'humanAgent') {
@@ -496,6 +504,7 @@ const googleListApprovedProfiles = async (req, res) => {
           const jwtToken = jwt.sign({ id: humanAgent._id, userType: 'humanAgent', clientId: humanAgent.clientId._id, email: humanAgent.email, aud: 'humanAgent', allowSwitch: true }, process.env.JWT_SECRET, { expiresIn: '7d' });
           const humanAgentProfileId = await Profile.findOne({ humanAgentId: humanAgent._id });
           const clientProfileId = await Profile.findOne({ clientId: humanAgent.clientId._id });
+          const humanAgentLogoUrl = await resolveClientLogoUrl(humanAgent.clientId);
 
           // Initialize tokens object for humanAgent
           const tokens = {
@@ -522,7 +531,8 @@ const googleListApprovedProfiles = async (req, res) => {
                         clientUserId: humanAgent.clientId.userId,
                        clientName: humanAgent.clientId.businessName || humanAgent.clientId.name || humanAgent.clientId.email,
                    humanAgentProfileId: humanAgentProfileId ? humanAgentProfileId._id : null,
-                     clientProfileId: clientProfileId ? clientProfileId._id : null
+                    clientProfileId: clientProfileId ? clientProfileId._id : null,
+                    logoUrl: humanAgentLogoUrl
                       });
         }
       } else if (only.userType === 'admin') {
