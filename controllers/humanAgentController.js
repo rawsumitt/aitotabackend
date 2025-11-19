@@ -492,6 +492,46 @@ async function resolveClientUserId(user) {
 	return String(candidate || '');
 }
 
+function buildStatusSet(statuses = []) {
+    return new Set((statuses || []).map(status => String(status || '').toLowerCase()));
+}
+
+const TOUCH_SUMMARY_STATUS_SETS = {
+    hotLeads: buildStatusSet(LEAD_STATUS_MAPPING.connected.interested.hotLeads),
+    warmLeads: buildStatusSet(LEAD_STATUS_MAPPING.connected.interested.warmLeads),
+    followUp: buildStatusSet(LEAD_STATUS_MAPPING.connected.interested.followUp),
+    convertedWon: buildStatusSet([
+        ...LEAD_STATUS_MAPPING.connected.interested.converted,
+        'converted',
+        'closed_won',
+        'won',
+        'sale_done'
+    ])
+};
+
+function summarizeDispositionCategories(statuses = []) {
+    const summary = {
+        hotLeads: 0,
+        warmLeads: 0,
+        followUp: 0,
+        convertedWon: 0
+    };
+    for (const status of statuses) {
+        const normalized = String(status || '').toLowerCase();
+        if (!normalized) continue;
+        if (TOUCH_SUMMARY_STATUS_SETS.hotLeads.has(normalized)) {
+            summary.hotLeads++;
+        } else if (TOUCH_SUMMARY_STATUS_SETS.warmLeads.has(normalized)) {
+            summary.warmLeads++;
+        } else if (TOUCH_SUMMARY_STATUS_SETS.followUp.has(normalized)) {
+            summary.followUp++;
+        } else if (TOUCH_SUMMARY_STATUS_SETS.convertedWon.has(normalized)) {
+            summary.convertedWon++;
+        }
+    }
+    return summary;
+}
+
 function uniqueNonEmpty(values = []) {
 	const set = new Set();
 	const out = [];
@@ -1370,6 +1410,7 @@ exports.getGroupsContacts = async (req, res) => {
                 [],
                 contactsWithDisposition
             );
+            paginatedData.touchedBreakdown = summarizeDispositionCategories([]);
             return res.json({
                 success: true,
                 data: paginatedData
@@ -1548,11 +1589,13 @@ exports.getGroupsContacts = async (req, res) => {
             }
         });
 
+        const touchedStatusSummary = summarizeDispositionCategories(touchedContacts.map(contact => contact.lastLeadStatus || contact.lastDispositionStatus));
         const paginatedData = buildPaginatedResponse(
             contactsWithDisposition,
             touchedContacts,
             untouchedContacts
         );
+        paginatedData.touchedBreakdown = touchedStatusSummary;
         return res.json({
             success: true,
             data: paginatedData
@@ -2178,6 +2221,7 @@ exports.getAssignedContacts = async (req, res) => {
     const totalCount = out.length;
     const paginated = out.slice(skip, skip + limitNum);
     const campaign = await Campaign.findById(campaignId).select('name description category').lean();
+    const categorySummary = summarizeDispositionCategories(out.map(contact => contact.leadStatus));
 
     return res.json({
       success: true,
@@ -2198,6 +2242,7 @@ exports.getAssignedContacts = async (req, res) => {
         nextPage: pageNum * limitNum < totalCount ? pageNum + 1 : null,
         prevPage: pageNum > 1 ? pageNum - 1 : null
       },
+      dispositionSummary: categorySummary,
       filter: { applied: filter || 'all', startDate: dateFilter.createdAt?.$gte, endDate: dateFilter.createdAt?.$lte }
     });
   } catch (error) {
