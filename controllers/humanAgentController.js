@@ -485,6 +485,29 @@ const TOUCH_SUMMARY_STATUS_SETS = {
     ])
 };
 
+const CONNECTED_INTERESTED_STATUS_SET = buildStatusSet([
+    ...LEAD_STATUS_MAPPING.connected.interested.hotLeads,
+    ...LEAD_STATUS_MAPPING.connected.interested.warmLeads,
+    ...LEAD_STATUS_MAPPING.connected.interested.followUp,
+    ...LEAD_STATUS_MAPPING.connected.interested.converted
+]);
+
+const CONNECTED_NOT_INTERESTED_STATUS_SET = buildStatusSet([
+    ...LEAD_STATUS_MAPPING.connected.notInterested.closedLost,
+    ...LEAD_STATUS_MAPPING.connected.notInterested.futureProspect
+]);
+
+const CONNECTED_STATUS_SET = new Set([
+    ...CONNECTED_INTERESTED_STATUS_SET,
+    ...CONNECTED_NOT_INTERESTED_STATUS_SET
+]);
+
+const NOT_CONNECTED_STATUS_SET = buildStatusSet([
+    ...LEAD_STATUS_MAPPING.notConnected.dnp,
+    ...LEAD_STATUS_MAPPING.notConnected.cnc,
+    ...LEAD_STATUS_MAPPING.notConnected.other
+]);
+
 function summarizeDispositionCategories(statuses = []) {
     const summary = {
         hotLeads: 0,
@@ -523,6 +546,48 @@ async function getClientIdCandidates(user) {
 	const rawFromToken = String(user?.clientId || '');
 	const resolvedUserId = await resolveClientUserId(user);
 	return uniqueNonEmpty([rawFromToken, resolvedUserId]);
+}
+
+function normalizePhoneValue(phone) {
+    if (MyDials && typeof MyDials.normalizePhoneNumber === 'function') {
+        return MyDials.normalizePhoneNumber(phone);
+    }
+    const digitsOnly = String(phone || '').replaceAll(/\D/g, '');
+    if (!digitsOnly) return '';
+    if (digitsOnly.length > 10) {
+        return digitsOnly.slice(-10);
+    }
+    return digitsOnly;
+}
+
+function determineConnectionStatusFromLead(leadStatusRaw, dispositionCategory, dispositionStatus) {
+    const normalizedLeadStatus = String(leadStatusRaw || '').toLowerCase();
+    if (normalizedLeadStatus && CONNECTED_STATUS_SET.has(normalizedLeadStatus)) {
+        return 'connected';
+    }
+    if (normalizedLeadStatus && NOT_CONNECTED_STATUS_SET.has(normalizedLeadStatus)) {
+        return 'not_connected';
+    }
+    const normalizedCategory = String(dispositionCategory || '').toLowerCase();
+    if (normalizedCategory === 'connected' || normalizedCategory === 'not_connected') {
+        return normalizedCategory;
+    }
+    if (String(dispositionStatus || '').toLowerCase() === 'disposed') {
+        return 'connected';
+    }
+    return 'unknown';
+}
+
+function determineInterestBucketFromLead(leadStatusRaw) {
+    const normalizedLeadStatus = String(leadStatusRaw || '').toLowerCase();
+    if (!normalizedLeadStatus) return null;
+    if (CONNECTED_INTERESTED_STATUS_SET.has(normalizedLeadStatus)) {
+        return 'interested';
+    }
+    if (CONNECTED_NOT_INTERESTED_STATUS_SET.has(normalizedLeadStatus)) {
+        return 'not_interested';
+    }
+    return null;
 }
 
 // Build date filter helper identical to client routes behavior
@@ -1240,6 +1305,9 @@ exports.getGroupsContacts = async (req, res) => {
         const dispositionFilter = ['touched', 'untouched', 'all'].includes(dispositionFilterRaw)
             ? dispositionFilterRaw
             : 'all';
+        const connectionFilterRaw = String(req.query?.connection || '').toLowerCase();
+        const allowedConnectionFilters = new Set(['all', 'connected', 'not_connected', 'unknown']);
+        const connectionFilter = allowedConnectionFilters.has(connectionFilterRaw) ? connectionFilterRaw : 'all';
 
         const buildPaginatedResponse = (allContacts, touchedContactsList, untouchedContactsList) => {
             let baseList = allContacts;
@@ -1249,11 +1317,20 @@ exports.getGroupsContacts = async (req, res) => {
                 baseList = untouchedContactsList;
             }
 
-            const totalContacts = baseList.length;
+            const applyConnectionFilterToList = (list) => {
+                if (connectionFilter === 'all') return list;
+                return list.filter(contact => (contact.connectionStatus || 'unknown') === connectionFilter);
+            };
+
+            const filteredBaseList = applyConnectionFilterToList(baseList);
+            const filteredTouchedList = applyConnectionFilterToList(touchedContactsList);
+            const filteredUntouchedList = applyConnectionFilterToList(untouchedContactsList);
+
+            const totalContacts = filteredBaseList.length;
             const totalPages = Math.max(1, Math.ceil(totalContacts / limit));
             const currentPage = Math.min(page, totalPages);
             const startIndex = (currentPage - 1) * limit;
-            const paginatedContacts = baseList.slice(startIndex, startIndex + limit);
+            const paginatedContacts = filteredBaseList.slice(startIndex, startIndex + limit);
 
             return {
                 contacts: paginatedContacts,
@@ -1264,10 +1341,11 @@ exports.getGroupsContacts = async (req, res) => {
                     totalContacts
                 },
                 filters: {
-                    disposition: dispositionFilter
+                    disposition: dispositionFilter,
+                    connection: connectionFilter
                 },
-                touchedCount: touchedContactsList.length,
-                untouchedCount: untouchedContactsList.length
+                touchedCount: filteredTouchedList.length,
+                untouchedCount: filteredUntouchedList.length
             };
         };
 
@@ -1306,7 +1384,18 @@ exports.getGroupsContacts = async (req, res) => {
         }
 
         if (!plainContacts.length) {
-            return res.json({ success: true, data: [] });
+            const emptyPayload = buildPaginatedResponse([], [], []);
+            emptyPayload.touchedBreakdown = summarizeDispositionCategories([]);
+            emptyPayload.connectionDispositions = organizeLeadsByStatus([]);
+            emptyPayload.connectionSummary = {
+                totalContacts: 0,
+                connected: 0,
+                connectedInterested: 0,
+                connectedNotInterested: 0,
+                notConnected: 0,
+                unknown: 0
+            };
+            return res.json({ success: true, data: emptyPayload });
         }
 
         const contactDemographicSources = (contact) => {
@@ -1338,10 +1427,25 @@ exports.getGroupsContacts = async (req, res) => {
             return null;
         };
 
-        const enrichContactWithDemographics = (contact, payload) => {
+        const enrichContactWithDemographics = (contact, payload, profile) => {
             const enriched = { ...payload };
+            const profileValueForField = (fieldName) => {
+                if (!profile) return undefined;
+                if (profile[fieldName] !== undefined && profile[fieldName] !== null && profile[fieldName] !== '') {
+                    return profile[fieldName];
+                }
+                if (fieldName === 'pinCode' && profile.pincode !== undefined && profile.pincode !== null && profile.pincode !== '') {
+                    return profile.pincode;
+                }
+                return undefined;
+            };
             const ensureField = (fieldName, keys) => {
-                if (enriched[fieldName] !== undefined) return;
+                if (enriched[fieldName] !== undefined && enriched[fieldName] !== null && enriched[fieldName] !== '') return;
+                const profileValue = profileValueForField(fieldName);
+                if (profileValue !== undefined) {
+                    enriched[fieldName] = profileValue;
+                    return;
+                }
                 const value = resolveDemographicField(contact, keys);
                 enriched[fieldName] = value !== undefined ? value : null;
             };
@@ -1352,52 +1456,38 @@ exports.getGroupsContacts = async (req, res) => {
             ensureField('pinCode', ['pinCode', 'pincode', 'zip', 'zipCode', 'postalCode']);
             ensureField('city', ['city', 'town', 'locationCity', 'district']);
 
+            if (profile?._id) {
+                enriched.contactProfileId = profile._id;
+                enriched.contactProfileUpdatedAt = profile.updatedAt || null;
+            }
             return enriched;
         };
 
-        const fallbackNormalize = MyDials.normalizePhoneNumber || ((phone) => {
-            const digitsOnly = String(phone || '').replaceAll(/\D/g, '');
-            if (digitsOnly.length > 10) {
-                return digitsOnly.slice(-10);
-            }
-            return digitsOnly;
-        });
-
         const normalizedPhonesSet = new Set();
         for (const contact of plainContacts) {
-            const normalized = fallbackNormalize(contact?.phone || contact?.phoneNumber || '');
+            const normalized = normalizePhoneValue(contact?.phone || contact?.phoneNumber || '');
             if (normalized) {
                 normalizedPhonesSet.add(normalized);
             }
         }
 
-        if (!normalizedPhonesSet.size) {
-            const contactsWithDisposition = plainContacts.map(contact => enrichContactWithDemographics(contact, {
-                ...contact,
-                dispositionStatus: 'not_disposed',
-                dispositionCount: 0,
-                lastDispositionAt: null,
-                lastLeadStatus: null,
-                lastDispositionCategory: null,
-                lastDispositionSubCategory: null
-            }));
-            const paginatedData = buildPaginatedResponse(
-                contactsWithDisposition,
-                [],
-                contactsWithDisposition
-            );
-            paginatedData.touchedBreakdown = summarizeDispositionCategories([]);
-            return res.json({
-                success: true,
-                data: paginatedData
-            });
-        }
-
         const normalizedPhones = Array.from(normalizedPhonesSet);
+
+        let contactProfilesByNormalized = new Map();
+        if (normalizedPhones.length) {
+            const contactProfiles = await ContactProfile.find({
+                normalizedPhoneNumber: { $in: normalizedPhones }
+            })
+                .select('_id normalizedPhoneNumber age gender profession city pincode contactName updatedAt phoneNumber')
+                .lean();
+            contactProfilesByNormalized = new Map(
+                contactProfiles.map(profile => [profile.normalizedPhoneNumber, profile])
+            );
+        }
 
         const contactMetaByNormalized = new Map();
         plainContacts.forEach((contact, index) => {
-            const normalized = fallbackNormalize(contact?.phone || contact?.phoneNumber || '');
+            const normalized = normalizePhoneValue(contact?.phone || contact?.phoneNumber || '');
             if (!normalized) return;
             let thresholdDate = null;
             if (contact.assignedAt) {
@@ -1413,112 +1503,116 @@ exports.getGroupsContacts = async (req, res) => {
             contactMetaByNormalized.get(normalized).push({ index, thresholdDate });
         });
 
-        const clientIdValue = group.clientId;
-        const clientIdMatch = mongoose.Types.ObjectId.isValid(clientIdValue)
-            ? new mongoose.Types.ObjectId(clientIdValue)
-            : clientIdValue;
+        let dispositionDocsByNormalized = new Map();
+        if (normalizedPhones.length) {
+            const clientIdValue = group.clientId;
+            const clientIdMatch = mongoose.Types.ObjectId.isValid(clientIdValue)
+                ? new mongoose.Types.ObjectId(clientIdValue)
+                : clientIdValue;
 
-        const baseMatch = {
-            clientId: clientIdMatch
-        };
+            const baseMatch = {
+                clientId: clientIdMatch
+            };
 
-        if (req.user.userType === 'humanAgent') {
-            baseMatch.humanAgentId = ownerId;
-        } else if (req.query.humanAgentId && mongoose.Types.ObjectId.isValid(req.query.humanAgentId)) {
-            baseMatch.humanAgentId = new mongoose.Types.ObjectId(req.query.humanAgentId);
-        }
+            if (req.user.userType === 'humanAgent') {
+                baseMatch.humanAgentId = ownerId;
+            } else if (req.query.humanAgentId && mongoose.Types.ObjectId.isValid(req.query.humanAgentId)) {
+                baseMatch.humanAgentId = new mongoose.Types.ObjectId(req.query.humanAgentId);
+            }
 
-        const dispositionDocs = await MyDials.aggregate([
-            { $match: baseMatch },
-            {
-                $addFields: {
-                    computedNormalizedPhone: {
-                        $let: {
-                            vars: {
-                                normalized: { $ifNull: ['$normalizedPhoneNumber', ''] },
-                                raw: { $ifNull: ['$phoneNumber', ''] }
-                            },
-                            in: {
-                                $cond: [
-                                    { $gt: [{ $strLenCP: '$$normalized' }, 0] },
-                                    '$$normalized',
-                                    {
-                                        $let: {
-                                            vars: {
-                                                digits: {
-                                                    $reduce: {
-                                                        input: {
-                                                            $regexFindAll: {
-                                                                input: '$$raw',
-                                                                regex: '[0-9]'
+            const dispositionDocs = await MyDials.aggregate([
+                { $match: baseMatch },
+                {
+                    $addFields: {
+                        computedNormalizedPhone: {
+                            $let: {
+                                vars: {
+                                    normalized: { $ifNull: ['$normalizedPhoneNumber', ''] },
+                                    raw: { $ifNull: ['$phoneNumber', ''] }
+                                },
+                                in: {
+                                    $cond: [
+                                        { $gt: [{ $strLenCP: '$$normalized' }, 0] },
+                                        '$$normalized',
+                                        {
+                                            $let: {
+                                                vars: {
+                                                    digits: {
+                                                        $reduce: {
+                                                            input: {
+                                                                $regexFindAll: {
+                                                                    input: '$$raw',
+                                                                    regex: '[0-9]'
+                                                                }
+                                                            },
+                                                            initialValue: '',
+                                                            in: {
+                                                                $concat: ['$$value', '$$this.match']
                                                             }
-                                                        },
-                                                        initialValue: '',
-                                                        in: {
-                                                            $concat: ['$$value', '$$this.match']
                                                         }
                                                     }
-                                                }
-                                            },
-                                            in: {
-                                                $let: {
-                                                    vars: {
-                                                        len: { $strLenCP: '$$digits' }
-                                                    },
-                                                    in: {
-                                                        $cond: [
-                                                            { $gt: ['$$len', 10] },
-                                                            {
-                                                                $substrCP: [
-                                                                    '$$digits',
-                                                                    { $subtract: ['$$len', 10] },
-                                                                    10
-                                                                ]
-                                                            },
-                                                            '$$digits'
-                                                        ]
+                                                },
+                                                in: {
+                                                    $let: {
+                                                        vars: {
+                                                            len: { $strLenCP: '$$digits' }
+                                                        },
+                                                        in: {
+                                                            $cond: [
+                                                                { $gt: ['$$len', 10] },
+                                                                {
+                                                                    $substrCP: [
+                                                                        '$$digits',
+                                                                        { $subtract: ['$$len', 10] },
+                                                                        10
+                                                                    ]
+                                                                },
+                                                                '$$digits'
+                                                            ]
+                                                        }
                                                     }
                                                 }
                                             }
                                         }
-                                    }
-                                ]
+                                    ]
+                                }
                             }
                         }
                     }
-                }
-            },
-            {
-                $match: {
-                    computedNormalizedPhone: { $in: normalizedPhones }
-                }
-            },
-            {
-                $project: {
-                    computedNormalizedPhone: 1,
-                    createdAt: 1,
-                    leadStatus: 1,
-                    category: 1,
-                    subCategory: 1
-                }
-            },
-            { $sort: { createdAt: -1 } }
-        ]);
+                },
+                {
+                    $match: {
+                        computedNormalizedPhone: { $in: normalizedPhones }
+                    }
+                },
+                {
+                    $project: {
+                        computedNormalizedPhone: 1,
+                        createdAt: 1,
+                        leadStatus: 1,
+                        category: 1,
+                        subCategory: 1
+                    }
+                },
+                { $sort: { createdAt: -1 } }
+            ]);
 
-        const dispositionDocsByNormalized = new Map();
-        for (const doc of dispositionDocs) {
-            const normalized = doc.computedNormalizedPhone;
-            if (!normalized) continue;
-            if (!dispositionDocsByNormalized.has(normalized)) {
-                dispositionDocsByNormalized.set(normalized, []);
+            dispositionDocsByNormalized = new Map();
+            for (const doc of dispositionDocs) {
+                const normalized = doc.computedNormalizedPhone;
+                if (!normalized) continue;
+                if (!dispositionDocsByNormalized.has(normalized)) {
+                    dispositionDocsByNormalized.set(normalized, []);
+                }
+                dispositionDocsByNormalized.get(normalized).push(doc);
             }
-            dispositionDocsByNormalized.get(normalized).push(doc);
         }
 
         const contactsWithDisposition = plainContacts.map((contact, contactIndex) => {
-            const normalized = fallbackNormalize(contact?.phone || contact?.phoneNumber || '');
+            const normalized = normalizePhoneValue(contact?.phone || contact?.phoneNumber || '');
+            const profile = normalized ? contactProfilesByNormalized.get(normalized) : null;
             if (!normalized) {
-                return enrichContactWithDemographics(contact, {
+                const enrichedFallback = enrichContactWithDemographics(contact, {
                     ...contact,
                     dispositionStatus: 'not_disposed',
                     dispositionCount: 0,
@@ -1526,7 +1620,9 @@ exports.getGroupsContacts = async (req, res) => {
                     lastLeadStatus: null,
                     lastDispositionCategory: null,
                     lastDispositionSubCategory: null
-                });
+                }, profile);
+                enrichedFallback.normalizedPhoneNumber = null;
+                return enrichedFallback;
             }
 
             const docsForContact = dispositionDocsByNormalized.get(normalized) || [];
@@ -1544,7 +1640,7 @@ exports.getGroupsContacts = async (req, res) => {
 
             const dispositionCount = filteredDocs.length;
             const lastDoc = filteredDocs[0] || docsForContact[0] || null;
-            return enrichContactWithDemographics(contact, {
+            const enriched = enrichContactWithDemographics(contact, {
                 ...contact,
                 dispositionStatus: dispositionCount > 0 ? 'disposed' : 'not_disposed',
                 dispositionCount,
@@ -1552,26 +1648,49 @@ exports.getGroupsContacts = async (req, res) => {
                 lastLeadStatus: lastDoc?.leadStatus || null,
                 lastDispositionCategory: lastDoc?.category || null,
                 lastDispositionSubCategory: lastDoc?.subCategory || null
-            });
+            }, profile);
+            enriched.normalizedPhoneNumber = normalized || null;
+            return enriched;
         });
 
-        const touchedContacts = [];
-        const untouchedContacts = [];
         contactsWithDisposition.forEach(contact => {
-            if (contact.dispositionStatus === 'disposed') {
-                touchedContacts.push(contact);
-            } else {
-                untouchedContacts.push(contact);
-            }
+            contact.leadStatus = contact.lastLeadStatus || contact.leadStatus || null;
+            const connectionStatus = determineConnectionStatusFromLead(
+                contact.leadStatus,
+                contact.lastDispositionCategory,
+                contact.dispositionStatus
+            );
+            const connectionInterest = connectionStatus === 'connected'
+                ? determineInterestBucketFromLead(contact.leadStatus)
+                : null;
+            contact.connectionStatus = connectionStatus;
+            contact.connectionInterest = connectionInterest;
         });
 
-        const touchedStatusSummary = summarizeDispositionCategories(touchedContacts.map(contact => contact.lastLeadStatus || contact.lastDispositionStatus));
+        const touchedContacts = contactsWithDisposition.filter(contact => contact.dispositionStatus === 'disposed');
+        const untouchedContacts = contactsWithDisposition.filter(contact => contact.dispositionStatus !== 'disposed');
+        const touchedStatusSummary = summarizeDispositionCategories(
+            touchedContacts.map(contact => contact.lastLeadStatus || contact.lastDispositionStatus)
+        );
         const paginatedData = buildPaginatedResponse(
             contactsWithDisposition,
             touchedContacts,
             untouchedContacts
         );
+        const connectionDispositions = organizeLeadsByStatus(contactsWithDisposition);
+        const totalContactsCount = contactsWithDisposition.length;
+        const knownConnectionCount = (connectionDispositions.totalCount || 0);
+        const unknownCount = Math.max(0, totalContactsCount - knownConnectionCount);
         paginatedData.touchedBreakdown = touchedStatusSummary;
+        paginatedData.connectionDispositions = connectionDispositions;
+        paginatedData.connectionSummary = {
+            totalContacts: totalContactsCount,
+            connected: connectionDispositions.connected?.totalCount || 0,
+            connectedInterested: connectionDispositions.connected?.interested?.totalCount || 0,
+            connectedNotInterested: connectionDispositions.connected?.notInterested?.totalCount || 0,
+            notConnected: connectionDispositions.notConnected?.totalCount || 0,
+            unknown: unknownCount
+        };
         return res.json({
             success: true,
             data: paginatedData
@@ -1691,6 +1810,147 @@ exports.deleteContactFromGroup = async (req, res) => {
 		console.error('Error deleting contact (human-agent):', e);
 		return res.status(500).json({ success: false, error: 'Failed to delete contact' });
 	}
+};
+
+exports.updateGroupContact = async (req, res) => {
+    try {
+        const mongoose = require('mongoose');
+        const { id, contactId } = req.params;
+        const payload = req.body || {};
+        const updatableFields = ['name', 'phone', 'email', 'status', 'gender', 'age', 'profession', 'city', 'pinCode', 'pincode'];
+        const hasUpdates = updatableFields.some(field => payload[field] !== undefined && payload[field] !== null);
+        if (!hasUpdates) {
+            return res.status(400).json({ success: false, error: 'Provide at least one field to update' });
+        }
+
+        const candidates = await getClientIdCandidates(req.user);
+        const ownerType = req.user.userType === 'humanAgent' ? 'humanAgent' : 'client';
+        const ownerId = new mongoose.Types.ObjectId(String(req.user.id));
+
+        const group = await Group.findOne({
+            _id: id,
+            clientId: { $in: candidates },
+            $or: [
+                { ownerType, ownerId },
+                { assignedHumanAgents: ownerId },
+                { 'contacts.assignedToHumanAgents.humanAgentId': ownerId }
+            ]
+        });
+        if (!group) return res.status(404).json({ success: false, error: 'Group not found' });
+
+        const contactSubdoc = group.contacts.id(contactId) || group.contacts.find(c => String(c._id) === String(contactId));
+        if (!contactSubdoc) return res.status(404).json({ success: false, error: 'Contact not found' });
+
+        if (payload.name !== undefined) {
+            const name = String(payload.name || '').trim();
+            if (!name) return res.status(400).json({ success: false, error: 'Name cannot be empty' });
+            contactSubdoc.name = name;
+        }
+
+        if (payload.phone !== undefined) {
+            const phone = String(payload.phone || '').trim();
+            if (!phone) return res.status(400).json({ success: false, error: 'Phone cannot be empty' });
+            contactSubdoc.phone = phone;
+        }
+
+        if (payload.email !== undefined) {
+            contactSubdoc.email = String(payload.email || '').trim().toLowerCase();
+        }
+
+        if (payload.status !== undefined) {
+            contactSubdoc.status = String(payload.status || '').trim();
+        }
+
+        group.markModified('contacts');
+        group.updatedAt = new Date();
+        await group.save();
+
+        const phoneForProfile = String(payload.phone !== undefined ? payload.phone : contactSubdoc.phone || '').trim();
+        const normalizedPhone = normalizePhoneValue(phoneForProfile);
+        const resolvedPinCode = payload.pinCode ?? payload.pincode;
+        const resolvedAge = payload.age !== undefined && payload.age !== null && payload.age !== ''
+            ? Number(payload.age)
+            : undefined;
+
+        let clientObjectId = null;
+        const clientIdCandidates = [req.user?.clientId, req.user?.id, group?.clientId];
+        for (const candidate of clientIdCandidates) {
+            if (mongoose.Types.ObjectId.isValid(candidate)) {
+                clientObjectId = new mongoose.Types.ObjectId(candidate);
+                break;
+            }
+        }
+        if (!clientObjectId && group?.clientId && typeof group.clientId === 'string' && group.clientId.length !== 24) {
+            try {
+                const clientDoc = await Client.findOne({ userId: group.clientId }).select('_id').lean();
+                if (clientDoc?._id) {
+                    clientObjectId = clientDoc._id;
+                }
+            } catch (_) { }
+        }
+
+        let contactProfileDoc = null;
+        if (normalizedPhone) {
+            const profileUpdate = {
+                phoneNumber: phoneForProfile,
+                contactName: contactSubdoc.name || ''
+            };
+            if (payload.gender !== undefined) profileUpdate.gender = payload.gender;
+            if (payload.profession !== undefined) profileUpdate.profession = payload.profession;
+            if (payload.city !== undefined) profileUpdate.city = payload.city;
+            if (resolvedPinCode !== undefined) profileUpdate.pincode = resolvedPinCode;
+            if (payload.age !== undefined) {
+                profileUpdate.age = Number.isFinite(resolvedAge) ? resolvedAge : payload.age;
+            }
+            if (clientObjectId) {
+                profileUpdate.clientId = clientObjectId;
+            }
+            if (ownerType === 'humanAgent') {
+                profileUpdate.humanAgentId = ownerId;
+            }
+
+            const shouldUpsert = !!clientObjectId;
+            const profileOptions = {
+                upsert: shouldUpsert,
+                new: true,
+                setDefaultsOnInsert: true
+            };
+
+            contactProfileDoc = await ContactProfile.findOneAndUpdate(
+                { normalizedPhoneNumber: normalizedPhone },
+                { $set: profileUpdate },
+                profileOptions
+            );
+            if (contactProfileDoc && typeof contactProfileDoc.toObject === 'function') {
+                contactProfileDoc = contactProfileDoc.toObject();
+            } else if (!contactProfileDoc) {
+                contactProfileDoc = await ContactProfile.findOne({ normalizedPhoneNumber: normalizedPhone }).lean();
+            }
+        }
+
+        const responseContact = contactSubdoc.toObject ? contactSubdoc.toObject() : { ...contactSubdoc };
+        responseContact.normalizedPhoneNumber = normalizedPhone || null;
+
+        if (contactProfileDoc) {
+            responseContact.gender = contactProfileDoc.gender || null;
+            responseContact.age = contactProfileDoc.age ?? null;
+            responseContact.profession = contactProfileDoc.profession || null;
+            responseContact.city = contactProfileDoc.city || null;
+            responseContact.pinCode = contactProfileDoc.pincode || contactProfileDoc.pinCode || null;
+            responseContact.contactProfileId = contactProfileDoc._id || null;
+        } else {
+            if (payload.gender !== undefined) responseContact.gender = payload.gender;
+            if (payload.age !== undefined) responseContact.age = payload.age;
+            if (payload.profession !== undefined) responseContact.profession = payload.profession;
+            if (payload.city !== undefined) responseContact.city = payload.city;
+            if (resolvedPinCode !== undefined) responseContact.pinCode = resolvedPinCode;
+        }
+
+        return res.json({ success: true, data: responseContact });
+    } catch (error) {
+        console.error('Error updating group contact (human-agent):', error);
+        return res.status(500).json({ success: false, error: 'Failed to update contact' });
+    }
 };
 
 // ============ Human Agent: Campaigns ============

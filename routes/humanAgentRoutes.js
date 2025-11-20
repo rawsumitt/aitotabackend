@@ -22,6 +22,7 @@ const {
 	bulkAddContactsToGroup,
 	bulkDeleteContactsFromGroup,
 	deleteContactFromGroup,
+	updateGroupContact,
 	createCampaign,
 	attachGroupsToCampaign,
 	startCampaign,
@@ -60,6 +61,7 @@ router.post('/groups/:id/contacts', verifyClientOrHumanAgentToken, addContactToG
 router.post('/groups/:id/contacts/bulk-add', verifyClientOrHumanAgentToken, bulkAddContactsToGroup);
 router.post('/groups/:id/contacts/bulk-delete', verifyClientOrHumanAgentToken, bulkDeleteContactsFromGroup);
 router.delete('/groups/:id/contacts/:contactId', verifyClientOrHumanAgentToken, deleteContactFromGroup);
+router.put('/groups/:id/contacts/:contactId', verifyClientOrHumanAgentToken, updateGroupContact);
 
 // Campaigns (human-agent)
 router.post('/campaigns', verifyClientOrHumanAgentToken, createCampaign);
