@@ -407,60 +407,36 @@ const LEAD_STATUS_MAPPING = {
 };
 
 // Helper function to organize leads by status
-function organizeLeadsByStatus(logs) {
+function organizeLeadsByStatus(logs, { includeData = true } = {}) {
+    const buildBucket = (statusList) => {
+        const matches = logs.filter(l => statusList.includes(l.leadStatus));
+        const bucket = {
+            count: matches.length,
+            statuses: statusList
+        };
+        if (includeData) {
+            bucket.data = matches;
+        }
+        return bucket;
+    };
+
     const leads = {
         connected: {
             interested: {
-                hotLeads: {
-                    data: logs.filter(l => LEAD_STATUS_MAPPING.connected.interested.hotLeads.includes(l.leadStatus)),
-                    count: logs.filter(l => LEAD_STATUS_MAPPING.connected.interested.hotLeads.includes(l.leadStatus)).length,
-                    statuses: LEAD_STATUS_MAPPING.connected.interested.hotLeads
-                },
-                warmLeads: {
-                    data: logs.filter(l => LEAD_STATUS_MAPPING.connected.interested.warmLeads.includes(l.leadStatus)),
-                    count: logs.filter(l => LEAD_STATUS_MAPPING.connected.interested.warmLeads.includes(l.leadStatus)).length,
-                    statuses: LEAD_STATUS_MAPPING.connected.interested.warmLeads
-                },
-                followUp: {
-                    data: logs.filter(l => LEAD_STATUS_MAPPING.connected.interested.followUp.includes(l.leadStatus)),
-                    count: logs.filter(l => LEAD_STATUS_MAPPING.connected.interested.followUp.includes(l.leadStatus)).length,
-                    statuses: LEAD_STATUS_MAPPING.connected.interested.followUp
-                },
-                converted: {
-                    data: logs.filter(l => LEAD_STATUS_MAPPING.connected.interested.converted.includes(l.leadStatus)),
-                    count: logs.filter(l => LEAD_STATUS_MAPPING.connected.interested.converted.includes(l.leadStatus)).length,
-                    statuses: LEAD_STATUS_MAPPING.connected.interested.converted
-                }
+                hotLeads: buildBucket(LEAD_STATUS_MAPPING.connected.interested.hotLeads),
+                warmLeads: buildBucket(LEAD_STATUS_MAPPING.connected.interested.warmLeads),
+                followUp: buildBucket(LEAD_STATUS_MAPPING.connected.interested.followUp),
+                converted: buildBucket(LEAD_STATUS_MAPPING.connected.interested.converted)
             },
             notInterested: {
-                closedLost: {
-                    data: logs.filter(l => LEAD_STATUS_MAPPING.connected.notInterested.closedLost.includes(l.leadStatus)),
-                    count: logs.filter(l => LEAD_STATUS_MAPPING.connected.notInterested.closedLost.includes(l.leadStatus)).length,
-                    statuses: LEAD_STATUS_MAPPING.connected.notInterested.closedLost
-                },
-                futureProspect: {
-                    data: logs.filter(l => LEAD_STATUS_MAPPING.connected.notInterested.futureProspect.includes(l.leadStatus)),
-                    count: logs.filter(l => LEAD_STATUS_MAPPING.connected.notInterested.futureProspect.includes(l.leadStatus)).length,
-                    statuses: LEAD_STATUS_MAPPING.connected.notInterested.futureProspect
-                }
+                closedLost: buildBucket(LEAD_STATUS_MAPPING.connected.notInterested.closedLost),
+                futureProspect: buildBucket(LEAD_STATUS_MAPPING.connected.notInterested.futureProspect)
             }
         },
         notConnected: {
-            dnp: {
-                data: logs.filter(l => LEAD_STATUS_MAPPING.notConnected.dnp.includes(l.leadStatus)),
-                count: logs.filter(l => LEAD_STATUS_MAPPING.notConnected.dnp.includes(l.leadStatus)).length,
-                statuses: LEAD_STATUS_MAPPING.notConnected.dnp
-            },
-            cnc: {
-                data: logs.filter(l => LEAD_STATUS_MAPPING.notConnected.cnc.includes(l.leadStatus)),
-                count: logs.filter(l => LEAD_STATUS_MAPPING.notConnected.cnc.includes(l.leadStatus)).length,
-                statuses: LEAD_STATUS_MAPPING.notConnected.cnc
-            },
-            other: {
-                data: logs.filter(l => LEAD_STATUS_MAPPING.notConnected.other.includes(l.leadStatus)),
-                count: logs.filter(l => LEAD_STATUS_MAPPING.notConnected.other.includes(l.leadStatus)).length,
-                statuses: LEAD_STATUS_MAPPING.notConnected.other
-            }
+            dnp: buildBucket(LEAD_STATUS_MAPPING.notConnected.dnp),
+            cnc: buildBucket(LEAD_STATUS_MAPPING.notConnected.cnc),
+            other: buildBucket(LEAD_STATUS_MAPPING.notConnected.other)
         }
     };
 
@@ -2222,6 +2198,7 @@ exports.getAssignedContacts = async (req, res) => {
     const paginated = out.slice(skip, skip + limitNum);
     const campaign = await Campaign.findById(campaignId).select('name description category').lean();
     const categorySummary = summarizeDispositionCategories(out.map(contact => contact.leadStatus));
+    const dispositionBuckets = organizeLeadsByStatus(out, { includeData: false });
 
     return res.json({
       success: true,
@@ -2243,6 +2220,7 @@ exports.getAssignedContacts = async (req, res) => {
         prevPage: pageNum > 1 ? pageNum - 1 : null
       },
       dispositionSummary: categorySummary,
+      dispositionBuckets,
       filter: { applied: filter || 'all', startDate: dateFilter.createdAt?.$gte, endDate: dateFilter.createdAt?.$lte }
     });
   } catch (error) {
